@@ -1,0 +1,9 @@
+{
+  "lastChangelogVersion": "1.2.0",
+  "defaultProvider": "opencode-go",
+  "defaultModel": "deepseek-v4.1-flash",
+  "editorPaddingX": 2,
+  "outputPad": 1,
+  "theme": "opencode",
+  "hideThinkingBlock": true
+}
