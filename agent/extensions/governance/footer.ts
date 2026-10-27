@@ -7,6 +7,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { throughputParts, type ThroughputSnapshot } from "./throughput.ts";
+import { CACHE_GLYPH, formatCacheRate, formatCacheRateCompact, summarizeCache, type CacheSummary } from "./cache.ts";
 
 export interface FooterState {
 	passcodeActive: boolean;
@@ -37,6 +38,20 @@ function throughputSegment(snapshot: ThroughputSnapshot, theme: Theme, form: "fu
 	const parts = throughputParts(snapshot.sample);
 	if (!parts) return null;
 	return theme.fg(snapshot.live ? "accent" : "muted", parts[form]);
+}
+
+/**
+ * `◐93.1% cache rate` — cached share of the session's prompt. The glyph is the
+ * last call's bucket: `●` hit (≥90% cached), `◐` partial, `○` miss. Narrow
+ * terminals drop the label and the decimal (`◐93%`).
+ * Hidden until a call with prompt tokens has been recorded.
+ */
+function cacheSegment(summary: CacheSummary, theme: Theme, form: "full" | "compact"): string | null {
+	if (!summary.lastBucket || summary.promptTokens <= 0) return null;
+	const glyph = theme.fg(summary.lastBucket === "hit" ? "success" : "warning", CACHE_GLYPH[summary.lastBucket]);
+	const rate = form === "full" ? formatCacheRate(summary.rate) : formatCacheRateCompact(summary.rate);
+	const label = form === "full" ? theme.fg("dim", " cache rate") : "";
+	return glyph + theme.fg("muted", rate) + label;
 }
 
 /** Color the streaming spinner. TUI only. */
@@ -74,8 +89,9 @@ export function installGovernanceTitleBar(ctx: ExtensionContext): void {
 }
 
 /**
- * One-line footer: session title, context usage, live throughput and session
- * totals on the left; git branch and cost on the right. TUI only.
+ * One-line footer: session title, context usage, cache hit rate, live
+ * throughput and session totals on the left; git branch and cost on the right.
+ * TUI only.
  */
 export function installGovernanceFooter(
 	ctx: ExtensionContext,
@@ -97,14 +113,17 @@ export function installGovernanceFooter(
 				let input = 0;
 				let output = 0;
 				let cost = 0;
+				const cacheUsages: Array<{ input: number; cacheRead: number }> = [];
 				for (const entry of ctx.sessionManager.getBranch()) {
 					if (entry.type === "message" && entry.message.role === "assistant") {
 						const message = entry.message as AssistantMessage;
 						input += message.usage.input;
 						output += message.usage.output;
 						cost += message.usage.cost.total;
+						cacheUsages.push({ input: message.usage.input, cacheRead: message.usage.cacheRead });
 					}
 				}
+				const cache = summarizeCache(cacheUsages);
 
 				const usage = ctx.getContextUsage();
 				const ctxLabel = usage?.percent != null ? `ctx ${Math.round(usage.percent)}%` : "ctx ?";
@@ -114,9 +133,11 @@ export function installGovernanceFooter(
 				const separator = theme.fg("borderMuted", "  ·  ");
 				const snapshot = state.throughput();
 				const tokens = `↑${formatTokens(input)}  ↓${formatTokens(output)}`;
-				// Throughput sits before the totals so it survives a narrow footer.
+				// Cache then throughput, both before the totals, so they survive a narrow footer.
 				const buildLeft = (form: "full" | "compact"): string => {
 					const parts = [titleStyled, theme.fg("muted", ctxLabel)];
+					const cacheText = cacheSegment(cache, theme, form);
+					if (cacheText) parts.push(cacheText);
 					const tps = throughputSegment(snapshot, theme, form);
 					if (tps) parts.push(tps);
 					parts.push(theme.fg("muted", tokens));
