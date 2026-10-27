@@ -1,19 +1,19 @@
 /**
- * Governance extension — plan-first mode with layered permissions.
+ * Governance extension — a permission gate that only stops to ask when a call
+ * reaches outside the project or `~/.pi`, or is irreversible.
  *
  * Defaults:
- *   - Every session starts in plan mode.
- *   - Main-session writes are free inside `<cwd>/docs/`, `~/.pi/setup/`, `/tmp`,
- *     and `os.tmpdir()`. Source/config writes inside the project or `~/.pi`
- *     outside those roots are hard-blocked: they go through a worker subagent.
- *   - Any other write/edit and any non-read-only bash command asks the user.
- *     Approvals can be remembered in the project allowlist
- *     (<project>/.pi/permissions.local.json) or the global allowlist
- *     (<agent-dir>/permissions.json).
- *   - Read-only bash may `cd` into the project, `~/.pi`, the pi installation
- *     directory, temp dirs, and configured `read` roots.
- *   - A small never-allow list is hard-blocked. The user can authorize a single
- *     run with the one-time passcode from /i-understand-the-danger.
+ *   - Writes/edits inside `<cwd>` and inside the pi config root (`~/.pi`) are
+ *     free. Any other write/edit asks the user; approvals can be remembered in
+ *     the project allowlist (<project>/.pi/permissions.local.json) or the
+ *     global allowlist (<agent-dir>/permissions.json).
+ *   - Read-only bash and commands that provably stay inside the project or
+ *     `~/.pi` run without asking. A command that reaches elsewhere, or talks to
+ *     the network, asks.
+ *   - A small always-prompt list of irreversible commands (rm -rf, force push,
+ *     git reset --hard, ...) is hard-blocked even inside the project. The user
+ *     can authorize a single run with the one-time passcode from
+ *     /i-understand-the-danger.
  *   - Subagent processes (env PI_GOVERNED_SUBAGENT=1) are scoped to their
  *     working directory plus explicit extra paths approved at launch time.
  *     They cannot prompt, so out-of-scope actions fail closed.
@@ -22,8 +22,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	type AllowRules,
@@ -32,12 +31,11 @@ import {
 	dangerousReason,
 	displayPath,
 	expandHome,
-	freeWriteRoots,
 	homeRelative,
 	isInside,
 	isCompoundCommand,
-	isSafeBashCommand,
 	loadRules,
+	mainBashVerdict,
 	mainWriteVerdict,
 	matchBashRule,
 	matchWriteRule,
@@ -68,18 +66,6 @@ const RENDER_INTERVAL_MS = 100;
  * the character count covers text, thinking, and tool-call JSON (D-0028).
  */
 const CHARS_PER_TOKEN = 4;
-
-const PLAN_CONTEXT = `[PLAN MODE ACTIVE — user's default plan-first mode]
-
-Working rules for this session:
-- Read and explore freely. Allowlisted read-only shell commands run without asking.
-- Ask clarifying questions BEFORE proposing work. Use the questionnaire tool to batch them; never silently assume. When something is ambiguous, ask.
-- Non-trivial work needs a plan file under docs/ (default: docs/plans/NNNN-slug.md, unless the repo has a different convention). Include goal, context, non-goals, steps, files to touch, test plan, risks, open questions, and status.
-- Record important decisions in docs/decisions.md (or the repo's convention): date, decision, alternatives considered, rationale. Record gotchas in docs/notes/ so they are not rediscovered.
-- Writes are pre-approved only inside docs/ in this project, ~/.pi/setup/, and temp dirs (/tmp, the OS temp dir). Source and config edits are hard-blocked here: delegate them to the worker subagent. Every other file write, and every non-read-only shell command, requires explicit user approval per call. If the user denies, ask for direction — do not retry or work around the gate.
-- Do not edit source code in this session. Delegate implementation to subagents (worker, tester, reviewer, documenter). Every subagent launch requires explicit user confirmation.
-- Never attempt to evade the permission system (shell redirection, encoding tricks, alternative tools). Hard-blocked commands need the user's one-time passcode from /i-understand-the-danger.
-- Before executing an approved plan, restate the goal and step list in chat.`;
 
 interface Passcode {
 	code: string;
@@ -170,7 +156,6 @@ function isOutsideSubagentScope(p: string): boolean {
 }
 
 export default function governanceExtension(pi: ExtensionAPI): void {
-	let planMode = true;
 	let passcode: Passcode | null = null;
 	let footerEnabled = true;
 	let footerInstalled = false;
@@ -191,12 +176,8 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 	installUserMessageRail(pi, () => userRailEnabled);
 
 	// -----------------------------------------------------------------------
-	// Mode helpers
+	// State helpers
 	// -----------------------------------------------------------------------
-
-	function modeLabel(): string {
-		return planMode ? "⏸ plan" : "▶ governed";
-	}
 
 	function passcodeActive(): boolean {
 		return passcode !== null && Date.now() < passcode.expiresAt;
@@ -204,16 +185,14 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 
 	function updateStatus(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
-		const badge = planMode ? ctx.ui.theme.fg("warning", "⏸ plan") : ctx.ui.theme.fg("accent", "▶ governed");
 		const key = passcodeActive() ? ctx.ui.theme.fg("warning", "🔑") : "";
-		ctx.ui.setStatus("governance", key ? `${badge} ${key}` : badge);
+		ctx.ui.setStatus("governance", key);
 	}
 
 	function setupFooter(ctx: ExtensionContext): void {
 		if (ctx.mode !== "tui") return;
 		if (footerEnabled && !footerInstalled) {
 			footerHandle = installGovernanceFooter(ctx, () => ({
-				planMode,
 				passcodeActive: passcodeActive(),
 				throughput: () => throughput.snapshot(),
 			}));
@@ -238,7 +217,7 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 	function setupTitleBar(ctx: ExtensionContext): void {
 		if (ctx.mode !== "tui") return;
 		if (titleEnabled && !titleInstalled) {
-			installGovernanceTitleBar(ctx, () => ({ planMode, passcodeActive: passcodeActive() }));
+			installGovernanceTitleBar(ctx);
 			titleInstalled = true;
 		} else if (!titleEnabled && titleInstalled) {
 			ctx.ui.setWidget("governance-title", undefined);
@@ -249,10 +228,6 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 	function setupThinking(ctx: ExtensionContext): void {
 		if (ctx.mode !== "tui") return;
 		ctx.ui.setHiddenThinkingLabel("Thinking… click to show");
-	}
-
-	function persist(): void {
-		pi.appendEntry("governance-mode", { planMode });
 	}
 
 	// -----------------------------------------------------------------------
@@ -309,6 +284,7 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 		const globalDirPattern = `${path.dirname(absPath)}${path.sep}`;
 		const globalDisplay = homeRelative(globalDirPattern);
 		const projectName = path.basename(cwd) || cwd;
+		const piDisplay = homeRelative(`${piRootPath()}${path.sep}`);
 
 		const allowOnce = "Allow once";
 		const fileProject = `Always allow this file (project): ${rel}`;
@@ -327,7 +303,7 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 
 		while (true) {
 			const choice = await ctx.ui.select(
-				`${modeLabel()} · Write approval\n\n${rel}\n\noutside ${projectName}`,
+				`Write approval\n\n${rel}\n\noutside ${projectName} and ${piDisplay}`,
 				options,
 			);
 
@@ -427,7 +403,7 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 
 		while (true) {
 			const choice = await ctx.ui.select(
-				`${modeLabel()} · Command approval${note ? `\n(${note})` : ""}\n\n$ ${normalized}`,
+				`Command approval${note ? `\n(${note})` : ""}\n\n$ ${normalized}`,
 				options,
 			);
 
@@ -534,21 +510,9 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 			// Expand `~` first, then resolve against the session cwd.
 			const abs = resolveWritePath(p, cwd);
 
-			// D-0011: docs, pi setup, and temp dirs are free; source/config edits
-			// inside the project or ~/.pi are delegated to a worker subagent.
+			// Inside the project or ~/.pi the write is ordinary work: no prompt.
 			const verdict = mainWriteVerdict(abs, { projectRoot: cwd, piRoot: piRootPath() });
 			if (verdict === "allow") return undefined;
-			if (verdict === "block-source") {
-				return {
-					block: true,
-					reason: [
-						"⛔ BLOCKED · source/config write",
-						`Path: ${displayPath(abs, cwd)}`,
-						"The main session may only write docs/, ~/.pi/setup/, and temp dirs.",
-						"Source and config edits are delegated: launch the `worker` subagent to make this change.",
-					].join("\n"),
-				};
-			}
 
 			const project = loadProjectRules(cwd);
 			const global = loadGlobalRules();
@@ -565,17 +529,24 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 			const command = typeof input.command === "string" ? input.command : "";
 			if (!command.trim()) return { block: true, reason: "Blocked: empty bash command." };
 
-			const reason = dangerousReason(command, cwd, [piRootPath()]);
+			// Irreversible operations win over every allow path below.
+			const reason = dangerousReason(command);
 			if (reason) return handleHardBlock(ctx, command, reason);
 
 			let cwdNote: string | undefined;
 			if (typeof input.cwd === "string" && input.cwd.length > 0) {
 				const requested = resolveFromCwd(input.cwd, cwd);
-				if (!isInside(cwd, requested)) cwdNote = `requested cwd: ${requested}`;
+				if (!isInside(cwd, requested) && !isInside(piRootPath(), requested)) {
+					cwdNote = `requested cwd: ${requested}`;
+				}
 			}
 
-			const roots = readRoots(cwd);
-			if (!cwdNote && isSafeBashCommand(command, cwd, roots, freeWriteRoots(cwd, piRootPath()))) return undefined;
+			if (
+				!cwdNote &&
+				mainBashVerdict(command, { projectRoot: cwd, piRoot: piRootPath(), readRoots: readRoots(cwd) }) === "allow"
+			) {
+				return undefined;
+			}
 
 			const project = loadProjectRules(cwd);
 			const global = loadGlobalRules();
@@ -649,7 +620,7 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 			const command = typeof input.command === "string" ? input.command : "";
 			if (!command.trim()) return { block: true, reason: "Blocked: empty bash command." };
 
-			const danger = dangerousReason(command, cwd);
+			const danger = dangerousReason(command);
 			if (danger) {
 				return {
 					block: true,
@@ -750,30 +721,8 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 	});
 
 	// -----------------------------------------------------------------------
-	// Mode lifecycle
+	// Commands
 	// -----------------------------------------------------------------------
-
-	pi.registerFlag("plan", {
-		description: "Start in plan mode (default: on)",
-		type: "boolean",
-		default: true,
-	});
-
-	pi.registerCommand("plan", {
-		description: "Toggle plan-first governed mode",
-		handler: async (_args, ctx) => {
-			planMode = !planMode;
-			updateStatus(ctx);
-			applyWorkingIndicator(ctx, planMode);
-			persist();
-			ctx.ui.notify(
-				planMode
-					? "Plan mode ON — code writes stay gated; delegate to subagents."
-					: "Plan mode OFF — same gate, but plan-first instructions are off.",
-				"info",
-			);
-		},
-	});
 
 	pi.registerCommand("permissions", {
 		description: "Show project and global allowlists",
@@ -791,8 +740,9 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 				[
 					render("Project", project, projectRulesPath(ctx.cwd)),
 					render("Global", global, globalRulesPath()),
-					`Main-session writes: docs/ + ~/.pi/setup/ + temp dirs. Source/config writes are delegated to a worker subagent.`,
-					`Read-only bash may cd into: the project, ~/.pi, the pi install, temp dirs, and read rules.`,
+					`Writes and local commands run free inside the project and ~/.pi; everything else prompts.`,
+					`Irreversible commands (rm -rf, force push, git reset --hard, ...) always prompt.`,
+					`Read rules extend the trusted roots for bash paths and cd.`,
 				].join("\n\n"),
 				"info",
 			);
@@ -837,62 +787,18 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.on("before_agent_start", async (event, ctx) => {
+	pi.on("before_agent_start", async (_event, ctx) => {
 		// Chrome is runtime state: reinstall it lazily after a reload.
 		setupFooter(ctx);
 		setupTitleBar(ctx);
 		setupThinking(ctx);
-		// Subagents are implementation processes, not planning sessions: never
-		// inject the main-session plan-first text into them. (The `plan` flag's
-		// negation is not accepted by the CLI in pi 1.2.0, so `--no-plan` cannot
-		// be used at spawn time.)
-		if (process.env.PI_GOVERNED_SUBAGENT === "1") return undefined;
-		if (!planMode || event.messageType !== "user") return undefined;
-		return {
-			message: {
-				customType: "governance-plan-context",
-				content: PLAN_CONTEXT,
-				display: false,
-			},
-		};
-	});
-
-	pi.on("context", async (event) => {
-		if (planMode) return undefined;
-		return {
-			messages: event.messages.filter((m) => {
-				const msg = m as AgentMessage & { customType?: string };
-				if (msg.customType === "governance-plan-context") return false;
-				if (msg.role !== "user") return true;
-				const content = msg.content;
-				if (typeof content === "string") return !content.includes("[PLAN MODE ACTIVE");
-				if (Array.isArray(content)) {
-					return !content.some(
-						(c) => c.type === "text" && (c as TextContent).text?.includes("[PLAN MODE ACTIVE"),
-					);
-				}
-				return true;
-			}),
-		};
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		const entries = ctx.sessionManager.getBranch();
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i] as { type?: string; customType?: string; data?: { planMode?: boolean } };
-			if (entry.type === "custom" && entry.customType === "governance-mode" && entry.data) {
-				if (typeof entry.data.planMode === "boolean") planMode = entry.data.planMode;
-				break;
-			}
-		}
-		if (pi.getFlag("plan") === false) planMode = false;
-		// Subagents are implementation processes: they never start in plan mode,
-		// so the badge and working indicator must not claim it.
-		if (process.env.PI_GOVERNED_SUBAGENT === "1") planMode = false;
 		updateStatus(ctx);
 		setupFooter(ctx);
 		setupTitleBar(ctx);
 		setupThinking(ctx);
-		applyWorkingIndicator(ctx, planMode);
+		applyWorkingIndicator(ctx);
 	});
 }

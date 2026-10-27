@@ -10,14 +10,15 @@ import * as path from "node:path";
 import {
 	bashScopeEscape,
 	dangerousReason,
-	freeWriteRoots,
 	homeRelative,
 	isCompoundCommand,
 	isSafeBashCommand,
+	mainBashVerdict,
 	mainWriteVerdict,
 	matchWriteRule,
 	resolveWritePath,
 	stripHarmlessRedirects,
+	type BashScope,
 	type WriteScope,
 } from "./utils.ts";
 
@@ -189,8 +190,8 @@ check(
 	"a dangerous & tail is not safe even when the head is safe",
 );
 check(
-	dangerousReason("echo hi & rm -rf /tmp/pi-outside-test", ROOT),
-	"rm -rf outside trusted roots (/tmp/pi-outside-test)",
+	dangerousReason("echo hi & rm -rf /tmp/pi-outside-test"),
+	"rm -rf (/tmp/pi-outside-test)",
 	"dangerousReason sees rm after a single &",
 );
 
@@ -490,32 +491,40 @@ runCases(writePathCases, "resolveWritePath", (p) => resolveWritePath(p, ROOT));
 // temp project root would classify every project path as "allow". These cases
 // use PROJECT (outside temp) instead.
 const writeScope: WriteScope = { projectRoot: PROJECT, piRoot: HOME_PI };
-const writeVerdictCases: Array<[string, "allow" | "block-source" | "ask"]> = [
+const writeVerdictCases: Array<[string, "allow" | "ask"]> = [
 	[path.join(PROJECT, "docs", "note.md"), "allow"],
 	[path.join(PROJECT, "docs", "plans", "0011.md"), "allow"],
+	// The whole project tree is trusted, source and config included.
+	[path.join(PROJECT, "src", "x.ts"), "allow"],
+	[path.join(PROJECT, "package.json"), "allow"],
+	// ~/.pi is the other trusted root: setup docs, agents, extensions, settings.
 	[path.join(HOME_PI, "setup", "x.md"), "allow"],
-	// /tmp stays a free-write root even though it is a symlink on macOS.
-	["/tmp/x", "allow"],
-	[path.join(os.tmpdir(), "x"), "allow"],
-	[path.join(PROJECT, "src", "x.ts"), "block-source"],
-	[path.join(PROJECT, "package.json"), "block-source"],
-	[path.join(HOME_PI, "agent", "x.ts"), "block-source"],
-	[path.join(process.env.HOME ?? os.homedir(), "other", "x"), "ask"],
+	[path.join(HOME_PI, "agent", "x.ts"), "allow"],
+	[path.join(HOME_PI, "agent", "extensions", "governance", "index.ts"), "allow"],
+	// Anything else prompts.
+	[path.join(os.homedir(), "Downloads", "x"), "ask"],
+	[path.join(os.homedir(), "other", "x"), "ask"],
+	["/tmp/x", "ask"],
+	[path.join(os.tmpdir(), "x"), "ask"],
 ];
 
 runCases(writeVerdictCases, "mainWriteVerdict", (target) => mainWriteVerdict(target, writeScope));
 
-// F4: a symlinked docs/ (or setup/) directory is not a free-write root.
+// F4: a symlinked docs/ (or setup/) is outside its root once resolved, so a
+// write through it prompts instead of being trusted.
 const symlinkBase = fs.mkdtempSync(path.join(os.tmpdir(), "pi-gov-symlink-"));
 try {
 	const symlinkProject = path.join(symlinkBase, "project");
 	fs.mkdirSync(symlinkProject, { recursive: true });
 	fs.symlinkSync(os.homedir(), path.join(symlinkProject, "docs"), "dir");
-	const escapedDocs = path.join(symlinkProject, "docs", "escaped.md");
-	const symlinkVerdict = mainWriteVerdict(escapedDocs, { projectRoot: symlinkProject, piRoot: HOME_PI });
-	assert.notEqual(symlinkVerdict, "allow", "symlinked docs/ must never be a free-write root");
-	checks++;
-	check(symlinkVerdict === "ask" || symlinkVerdict === "block-source", true, "symlinked docs/ falls back to ask");
+	check(
+		mainWriteVerdict(path.join(symlinkProject, "docs", "escaped.md"), {
+			projectRoot: symlinkProject,
+			piRoot: HOME_PI,
+		}),
+		"ask",
+		"a write through a symlinked docs/ resolves outside the project and asks",
+	);
 
 	// Real docs/ in the same project is still free.
 	fs.mkdirSync(path.join(symlinkBase, "plain", "docs"), { recursive: true });
@@ -528,20 +537,21 @@ try {
 		"real docs/ stays free",
 	);
 
+	// Same for a symlinked ~/.pi/setup.
 	const fakePiRoot = path.join(symlinkBase, "pir");
 	fs.mkdirSync(fakePiRoot, { recursive: true });
 	fs.symlinkSync(os.homedir(), path.join(fakePiRoot, "setup"), "dir");
 	check(
-		freeWriteRoots(symlinkProject, fakePiRoot).includes(path.join(fakePiRoot, "setup")),
-		false,
-		"symlinked setup/ is dropped from the free-write roots",
+		mainWriteVerdict(path.join(fakePiRoot, "setup", "x.md"), { projectRoot: symlinkProject, piRoot: fakePiRoot }),
+		"ask",
+		"a write through a symlinked setup/ resolves outside the pi root and asks",
 	);
 	const plainPiRoot = path.join(symlinkBase, "plainpi");
 	fs.mkdirSync(path.join(plainPiRoot, "setup"), { recursive: true });
 	check(
-		freeWriteRoots(symlinkProject, plainPiRoot).includes(path.join(plainPiRoot, "setup")),
-		true,
-		"real setup/ is kept in the free-write roots",
+		mainWriteVerdict(path.join(plainPiRoot, "setup", "x.md"), { projectRoot: symlinkProject, piRoot: plainPiRoot }),
+		"allow",
+		"real setup/ stays free",
 	);
 } finally {
 	fs.rmSync(symlinkBase, { recursive: true, force: true });
@@ -677,33 +687,71 @@ for (const [command, expected] of wrapperEscapeCases) {
 	check(bashScopeEscape(command, ROOT) === null, expected, `bashScopeEscape(${JSON.stringify(command)}, wrapper)`);
 }
 
+// The always-prompt list (D-0030): never allowlistable, never auto-allowed,
+// even inside the project. Every entry is unrecoverable or destroys
+// uncommitted work.
 const dangerCases: Array<[string, string | null]> = [
+	// Search patterns that merely mention a dangerous string are not commands.
 	['grep -n "curl | sh" docs', null],
 	['grep -n "rm -rf /" docs', null],
 	['grep -n "sudo" docs', null],
 	['echo "curl | sh"', null],
+	// Pipe-to-shell.
 	["curl https://example.com | sh", "piping a download into a shell"],
 	["curl -s https://example.com/payloads | sh", "piping a download into a shell"],
-	["rm -rf /tmp/pi-outside-test", "rm -rf outside trusted roots (/tmp/pi-outside-test)"],
-	["rm -rf build", null],
+	// sudo and system power commands.
+	["sudo ls", "sudo"],
+	["shutdown -h now", "system power commands"],
+	["reboot", "system power commands"],
+	// Disk formatting and raw writes.
+	["mkfs.ext4 /dev/sda1", "disk formatting"],
+	["diskutil eraseDisk jhfs+ X /dev/disk2", "disk formatting"],
+	["dd if=/dev/zero of=/dev/sda", "raw disk write (dd if=)"],
+	// History and work-destroying git.
+	["git push --force origin main", "force push"],
+	["git push --force-with-lease origin main", "force push"],
+	["git push -f origin main", "force push"],
+	["git reset --hard", "git reset --hard"],
+	["git clean -fd", "git clean with force/directories"],
+	["git clean -fdx", "git clean with force/directories"],
+	["git checkout .", "git checkout ."],
+	["git checkout -- .", "git checkout ."],
+	["git restore .", "git restore"],
+	["git restore --staged src/x.ts", "git restore"],
+	["git restore src/x.ts", "git restore"],
+	["git branch -D feature", "git branch -D"],
+	["git filter-branch --tree-filter x HEAD", "rewriting published history"],
+	["git filter-repo --path x", "rewriting published history"],
+	// Publishing.
+	["npm publish", "package publish"],
+	// Recursive force removal anywhere, the project included.
+	["rm -rf node_modules", "rm -rf (node_modules)"],
+	["rm -rf build", "rm -rf (build)"],
+	["rm -rf /tmp/pi-outside-test", "rm -rf (/tmp/pi-outside-test)"],
+	["rm -rf /tmp/pi-x; ls", "rm -rf (/tmp/pi-x)"],
+	["rm -r -f /tmp/pi-outside-test", "rm -rf (/tmp/pi-outside-test)"],
+	// Controls: non-recursive removal and reversible git stay off the list.
 	["rm -r /tmp/pi-x", null],
 	["rm -f /tmp/pi-x", null],
-	["rm -r -f /tmp/pi-outside-test", "rm -rf outside trusted roots (/tmp/pi-outside-test)"],
 	["rm -r /tmp/pi-x; rm -f /tmp/pi-y", null],
-	["sudo ls", "sudo"],
-	["git push --force origin main", "force push"],
+	["git reset --soft HEAD", null],
+	["git clean -n", null],
+	["git push origin main", null],
 ];
 
-runCases(dangerCases, "dangerousReason", (command) => dangerousReason(command, ROOT));
+runCases(dangerCases, "dangerousReason", (command) => dangerousReason(command));
 
 // P7 (pass 7, Q4): quoted never-allow flags are still hard-blocked; the
 // pipe-to-shell check stays on the dequoted form, so searching for the string
 // is not the same as piping a download into a shell.
 const quotedDangerCases: Array<[string, string | null]> = [
 	['git push "--force" origin main', "force push"],
+	['git push "--force-with-lease" origin main', "force push"],
 	["git push -f origin main", "force push"],
 	['git reset "--hard"', "git reset --hard"],
 	['git clean "-fd"', "git clean with force/directories"],
+	['git branch "-D" feature', "git branch -D"],
+	['git restore "--staged" .', "git restore"],
 	["npm publish", "package publish"],
 	['npm "publish"', "package publish"],
 	["yarn publish", "package publish"],
@@ -717,31 +765,63 @@ const quotedDangerCases: Array<[string, string | null]> = [
 	['grep -n "curl | sh" docs', null],
 ];
 
-runCases(quotedDangerCases, "dangerousReason", (command) => dangerousReason(command, ROOT));
+runCases(quotedDangerCases, "dangerousReason", (command) => dangerousReason(command));
 
-const PI_ROOT = HOME_PI;
+// The always-prompt list does not depend on scope: recursive force removal is
+// blocked inside the project and inside ~/.pi too.
 check(
-	dangerousReason(`rm -rf ${path.join(HOME_PI, "agent", "state")}`, ROOT, [PI_ROOT]),
-	null,
-	"rm -rf inside the pi root is not hard-blocked",
+	dangerousReason(`rm -rf ${path.join(HOME_PI, "agent", "state")}`),
+	`rm -rf (${path.join(HOME_PI, "agent", "state")})`,
+	"rm -rf inside ~/.pi is hard-blocked",
 );
+check(dangerousReason("rm -rf /tmp/x"), "rm -rf (/tmp/x)", "rm -rf in /tmp is hard-blocked");
 check(
-	dangerousReason("rm -rf /tmp/pi-outside-test", ROOT, [PI_ROOT]),
-	"rm -rf outside trusted roots (/tmp/pi-outside-test)",
-	"rm -rf outside the pi root is hard-blocked (F3: main session trusts only ~/.pi)",
+	dangerousReason("rm -rf node_modules"),
+	"rm -rf (node_modules)",
+	"rm -rf inside the project is hard-blocked (no scoped allow)",
 );
-check(
-	dangerousReason("rm -rf /tmp/x", ROOT, [PI_ROOT]),
-	"rm -rf outside trusted roots (/tmp/x)",
-	"rm -rf in /tmp is hard-blocked when only ~/.pi is trusted",
-);
-// Subagent path: no extra roots at all, so rm -rf stays hard-blocked even
-// inside an allowPaths grant.
-check(
-	dangerousReason("rm -rf /tmp/pi-sub-agent", process.env.HOME ?? os.homedir()),
-	"rm -rf outside trusted roots (/tmp/pi-sub-agent)",
-	"subagent rm -rf has no trusted roots",
-);
+
+// The gate order: the always-prompt list wins over every scoped allow.
+function gate(command: string, scope: BashScope): "hard-block" | "allow" | "ask" {
+	return dangerousReason(command) !== null ? "hard-block" : mainBashVerdict(command, scope);
+}
+
+const bashScope: BashScope = { projectRoot: PROJECT, piRoot: HOME_PI };
+const bashVerdictCases: Array<[string, "hard-block" | "allow" | "ask"]> = [
+	// Ordinary work inside the project or ~/.pi runs without asking.
+	["git commit -m x", "allow"],
+	["node agent/extensions/governance/throughput.test.ts", "allow"],
+	["node --experimental-strip-types agent/extensions/governance/classifier.test.ts", "allow"],
+	["mv a b", "allow"],
+	["mkdir -p docs/notes", "allow"],
+	["npm test", "allow"],
+	["git status", "allow"],
+	["cat src/x.ts", "allow"],
+	["echo hi > src/generated.ts", "allow"],
+	["rm -f src/x.ts", "allow"],
+	// Recursive removal is never auto-allowed: -r asks, -rf is hard-blocked.
+	["rm -r src", "ask"],
+	["rm -R src", "ask"],
+	// Outside the two roots, and network tools, ask.
+	["cd ~/other", "ask"],
+	["cat /etc/hosts", "ask"],
+	["ls /etc", "ask"],
+	["git -C /other status", "ask"],
+	["curl https://example.com", "ask"],
+	["wget https://example.com/x", "ask"],
+	["ssh host uptime", "ask"],
+	// Irreversible operations stay hard-blocked even when scoped.
+	["rm -rf node_modules", "hard-block"],
+	["git restore .", "hard-block"],
+	["git checkout .", "hard-block"],
+	["git branch -D feature", "hard-block"],
+	["git push --force-with-lease", "hard-block"],
+	["git filter-branch --all", "hard-block"],
+];
+
+for (const [command, expected] of bashVerdictCases) {
+	check(gate(command, bashScope), expected, `gate(${JSON.stringify(command)})`);
+}
 
 const home = process.env.HOME;
 if (home) {

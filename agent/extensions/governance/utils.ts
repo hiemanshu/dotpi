@@ -75,41 +75,11 @@ export function uniqueResolved(paths: Array<string | undefined | null>): string[
 }
 
 /**
- * A docs/setup root is only trustworthy if it is a plain child directory of
- * its base. If `<project>/docs` (or `<piRoot>/setup`) is a symlink pointing
- * elsewhere, the derived root is dropped so its writes fall back to the prompt
- * path instead of being trusted.
- */
-function derivedWriteRoot(base: string, name: string): string | null {
-	const root = path.join(base, name);
-	const expected = path.join(realPathForScope(base), name);
-	return realPathForScope(root) === expected ? root : null;
-}
-
-/**
- * Roots the main session may write to without a prompt: `<project>/docs/`,
- * `<piRoot>/setup/`, `/tmp`, and `os.tmpdir()`. When `piRoot` is omitted the
- * home config root (`~/.pi`) is assumed. The docs/setup roots are dropped when
- * they are symlinks (`/tmp` and `os.tmpdir()` are deliberately kept as-is).
- */
-export function freeWriteRoots(projectRoot: string, piRoot?: string): string[] {
-	const configRoot = piRoot ?? path.join(os.homedir(), ".pi");
-	return uniqueResolved([
-		derivedWriteRoot(projectRoot, "docs"),
-		derivedWriteRoot(configRoot, "setup"),
-		"/tmp",
-		os.tmpdir(),
-	]);
-}
-
-/**
  * What the main session may do with a write:
- *   - "allow"        free-write root (docs, pi setup, temp dirs)
- *   - "block-source" inside the project or `~/.pi` outside those roots:
- *                     source/config writes are delegated to a worker subagent
- *   - "ask"          anywhere else (the existing prompt path)
+ *   - "allow"  inside the project or inside the pi config root (~/.pi)
+ *   - "ask"    anywhere else (the existing prompt path)
  */
-export type WriteVerdict = "allow" | "block-source" | "ask";
+export type WriteVerdict = "allow" | "ask";
 
 export interface WriteScope {
 	/** Session project root (ctx.cwd). */
@@ -120,10 +90,8 @@ export interface WriteScope {
 
 export function mainWriteVerdict(absPath: string, scope: WriteScope): WriteVerdict {
 	const target = path.resolve(absPath);
-	const roots = freeWriteRoots(scope.projectRoot, scope.piRoot);
-	if (roots.some((root) => isInside(root, target))) return "allow";
-	if (isInside(scope.projectRoot, target)) return "block-source";
-	if (isInside(scope.piRoot, target)) return "block-source";
+	if (isInside(scope.projectRoot, target)) return "allow";
+	if (isInside(scope.piRoot, target)) return "allow";
 	return "ask";
 }
 
@@ -592,20 +560,22 @@ function shellWords(command: string): string[] {
 }
 
 /**
- * Returns a human-readable reason when a command is on the never-allow list
- * (even with an allowlist entry). `null` means the command is not hard-blocked.
+ * Returns a human-readable reason when a command is on the always-prompt list.
+ * These are never allowlistable and never auto-allowed, even inside the
+ * project: each one is unrecoverable or destroys uncommitted work. `null`
+ * means the command is not on the list.
  */
-export function dangerousReason(command: string, projectRoot: string, extraTrustedRoots: string[] = []): string | null {
+export function dangerousReason(command: string): string | null {
 	const c = command;
 	const bare = dequote(c);
-	// Quoted flags still count for the never-allow list: `git push "--force"`
+	// Quoted flags still count for the always-prompt list: `git push "--force"`
 	// and `npm "publish"` must not be allowlistable away. Remove only the quote
 	// characters so the flag content stays visible.
 	const unquoted = c.replace(/['"]/g, "");
 
 	if (/(^|\s)sudo(\s|$)/.test(bare)) return "sudo";
 	if (/\b(shutdown|reboot|halt|poweroff)\b/.test(bare)) return "system power commands";
-	if (/\b(mkfs(\.\w+)?|fdisk|diskutil\s+erase)\b/i.test(bare)) return "disk formatting";
+	if (/\b(mkfs(\.\w+)?|fdisk|diskutil\s+erase\w*)\b/i.test(bare)) return "disk formatting";
 	if (/\bdd\b[^|]*\bif=/.test(bare)) return "raw disk write (dd if=)";
 
 	// Pipe-to-shell keeps the dequoted form: a search pattern such as
@@ -617,16 +587,21 @@ export function dangerousReason(command: string, projectRoot: string, extraTrust
 		}
 	}
 
-	if (/\bgit\s+push\b[^|]*(--force\b|(^|\s)-f(\s|$))/.test(unquoted)) return "force push";
+	if (/\bgit\s+push\b[^|;&\n]*(--force(-with-lease)?\b|(^|\s)-f(\s|$))/.test(unquoted)) return "force push";
 	if (/\bgit\s+reset\s+--hard\b/.test(unquoted)) return "git reset --hard";
-	if (/\bgit\s+clean\b[^|]*-[A-Za-z]*[fFdD]/.test(unquoted)) return "git clean with force/directories";
+	if (/\bgit\s+clean\b[^|;&\n]*-[A-Za-z]*[fFdD]/.test(unquoted)) return "git clean with force/directories";
+	if (/\bgit\s+checkout\b[^|;&\n]*\s(?:--\s+)?\.(\s|$)/.test(unquoted)) return "git checkout .";
+	if (/\bgit\s+restore\b/.test(unquoted)) return "git restore";
+	if (/\bgit\s+branch\b[^|;&\n]*\s-[A-Za-z]*D[A-Za-z]*(\s|$)/.test(unquoted)) return "git branch -D";
+	if (/\bgit\s+filter-(branch|repo)\b/.test(unquoted)) return "rewriting published history";
 	if (/\b(npm|yarn|pnpm|bun)\s+publish\b/.test(unquoted)) return "package publish";
 
-	const segments = splitShellSegments(c);
 	if (/:\s*\(\s*\)\s*\{[^}]*\}\s*;\s*:/.test(bare)) return "fork bomb";
 	if (/\bchmod\s+(-[A-Za-z]+\s+)*777\s+\/(\s|$)/.test(bare)) return "chmod 777 /";
 
-	for (const segment of segments) {
+	// Recursive force removal is never auto-allowed, inside the project too: it
+	// destroys uncommitted work whether or not git could restore it.
+	for (const segment of splitShellSegments(c)) {
 		const words = shellWords(segment);
 		const rmIndex = words.findIndex((word) => /^rm$/i.test(word));
 		if (rmIndex < 0) continue;
@@ -636,11 +611,7 @@ export function dangerousReason(command: string, projectRoot: string, extraTrust
 		if (!recursive || !force) continue;
 		const targets = args.filter((word) => !/^--?[A-Za-z-]+$/.test(word) && word !== "--");
 		if (targets.length === 0) return "rm -rf with an indeterminate target";
-		const roots = [projectRoot, ...extraTrustedRoots];
-		const outside = targets.filter(
-			(target) => !roots.some((root) => isInside(root, resolveFromCwd(target, projectRoot))),
-		);
-		if (outside.length > 0) return `rm -rf outside trusted roots (${outside.join(", ")})`;
+		return `rm -rf (${targets.join(", ")})`;
 	}
 
 	return null;
@@ -816,6 +787,68 @@ const INTERPRETER_SAFE_FLAGS = new Set([
 	"--no-warnings",
 	"--enable-source-maps",
 ]);
+
+/**
+ * Commands that talk to the network or another host. They have no path
+ * argument the gate could scope, so they always ask (and can be allowlisted).
+ */
+const EXTERNAL_COMMANDS = /^(?:curl|wget|ssh|scp|sftp|rsync|ftp|telnet|nc|ncat|nmap|http|https|aria2c)$/i;
+
+/** The external command word a segment starts with, or `null`. */
+export function externalCommandReason(command: string): string | null {
+	for (const segment of splitShellSegments(command)) {
+		const words = shellWords(segment);
+		let i = 0;
+		while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++;
+		const word = words[i];
+		if (word && EXTERNAL_COMMANDS.test(path.basename(word))) return word;
+	}
+	return null;
+}
+
+export interface BashScope extends WriteScope {
+	/**
+	 * Extra roots trusted for paths and `cd`: the pi install, temp dirs, and
+	 * configured `read` rules. Omitted means project + `~/.pi` only.
+	 */
+	readRoots?: string[];
+}
+
+/**
+ * What the main session may do with a bash command:
+ *   - "allow" when every path in it provably stays inside a trusted root and it
+ *     is not an external/network command
+ *   - "ask" otherwise (the caller runs the always-prompt list first)
+ *
+ * The read-only safe list keeps its job: a safe command inside the roots is
+ * allowed without any further analysis.
+ */
+export function mainBashVerdict(command: string, scope: BashScope): "allow" | "ask" {
+	const trimmed = command.trim();
+	if (!trimmed) return "ask";
+	const roots = uniqueResolved([scope.projectRoot, scope.piRoot, ...uniqueResolved(scope.readRoots ?? [])]);
+	// Nothing outside the roots is provable, read-only or not.
+	if (bashScopeEscape(trimmed, roots) !== null) return "ask";
+	if (isSafeBashCommand(trimmed, scope.projectRoot, roots, roots)) return "allow";
+	if (externalCommandReason(trimmed)) return "ask";
+	if (hasRecursiveRemove(trimmed)) return "ask";
+	return "allow";
+}
+
+/**
+ * Recursive removal destroys a tree in one keystroke, so it is never
+ * auto-allowed: `rm -r` asks, `rm -rf` is hard-blocked by `dangerousReason`.
+ */
+function hasRecursiveRemove(command: string): boolean {
+	for (const segment of splitShellSegments(command)) {
+		const words = shellWords(segment);
+		const rmIndex = words.findIndex((word) => /^rm$/i.test(word));
+		if (rmIndex < 0) continue;
+		const args = words.slice(rmIndex + 1);
+		if (args.some((word) => /^-[A-Za-z]*[rR][A-Za-z]*$|^--recursive$/.test(word))) return true;
+	}
+	return false;
+}
 
 /**
  * Resolve a write target as the gate sees it: expand a leading `~`, then make

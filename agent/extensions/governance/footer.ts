@@ -8,12 +8,8 @@ import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { throughputParts, type ThroughputSnapshot } from "./throughput.ts";
 
-export interface TitleState {
-	planMode: boolean;
+export interface FooterState {
 	passcodeActive: boolean;
-}
-
-export interface FooterState extends TitleState {
 	throughput: () => ThroughputSnapshot;
 }
 
@@ -43,34 +39,32 @@ function throughputSegment(snapshot: ThroughputSnapshot, theme: Theme, form: "fu
 	return theme.fg(snapshot.live ? "accent" : "muted", parts[form]);
 }
 
-/** Color the streaming spinner to match the current mode. TUI only. */
-export function applyWorkingIndicator(ctx: ExtensionContext, planMode: boolean): void {
+/** Color the streaming spinner. TUI only. */
+export function applyWorkingIndicator(ctx: ExtensionContext): void {
 	if (ctx.mode !== "tui") return;
-	const color = planMode ? "warning" : "accent";
 	ctx.ui.setWorkingIndicator({
-		frames: SPINNER_FRAMES.map((frame) => ctx.ui.theme.fg(color, frame)),
+		frames: SPINNER_FRAMES.map((frame) => ctx.ui.theme.fg("accent", frame)),
 		intervalMs: 80,
 	});
 }
 
 /**
- * Persistent title bar above the editor: project + mode + model.
- * A widget instead of a header, because pi's header scrolls with the transcript.
+ * Persistent title bar above the editor: project on the left, model on the
+ * right. A widget instead of a header, because pi's header scrolls with the
+ * transcript.
  */
-export function installGovernanceTitleBar(ctx: ExtensionContext, getState: () => TitleState): void {
+export function installGovernanceTitleBar(ctx: ExtensionContext): void {
 	if (ctx.mode !== "tui") return;
 	ctx.ui.setWidget(
 		"governance-title",
 		(_tui, theme) => ({
 			invalidate() {},
 			render(width: number): string[] {
-				const state = getState();
 				const project = path.basename(ctx.cwd) || ctx.cwd;
 				const projectLabel = project.length > 32 ? `${project.slice(0, 31)}…` : project;
 				const left = `  π  ${projectLabel}`;
-				const mode = state.planMode ? "⏸ plan" : "▶ governed";
 				const model = ctx.model?.id ?? "no-model";
-				const right = `${mode}  ·  ${model}  `;
+				const right = `${model}  `;
 				const gap = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
 				return [theme.style(truncateToWidth(left + gap + right, width), { fg: "text", bg: "toolPendingBg" })];
 			},

@@ -8,53 +8,44 @@ This file applies to every project. Project-level `AGENTS.md` files override it 
 - **Setup artifacts:** `~/.pi/setup/` — plans, decision records, and notes about configuring the agent itself. Setup docs never belong in a project repo.
 - **Project docs:** `docs/` inside each repo (plans, decisions, notes), unless the repo has its own convention.
 
-## Default mode: plan first, governed
+## How we work
 
-Every session starts in **plan mode**. The `governance` extension enforces this:
+We work like colleagues: agree on what we are doing, then do it in small tested pieces.
 
-- Read-only tools (`read`, `grep`, `find`, `ls`) and allowlisted read-only shell commands run without asking. Read-only bash may `cd` into the project, `~/.pi`, the pi installation directory, `/tmp`, the OS temp dir, and any configured `read` roots.
-- Writes are free only inside `docs/` of the current project, `~/.pi/setup/`, `/tmp`, and the OS temp dir. Source and config edits inside the project and inside `~/.pi` outside `setup/` are hard-blocked for the main session: delegate them to the `worker` subagent (no passcode path).
-- Every other write/edit and every non-read-only shell command requires an explicit user approval per call. If the user allows it "always", it is added to an allowlist (`<project>/.pi/permissions.local.json` or `~/.pi/agent/permissions.json`).
-- A never-allow list (sudo, force push, hard reset, publish, `rm -rf` outside the project, pipe-to-shell, …) is hard-blocked. Only the user can authorize one of these, once, with the passcode from `/i-understand-the-danger`.
-- Subagents run in separate processes scoped to the project directory. They cannot prompt, so out-of-scope actions fail closed. Outside access requires the main session to ask the user and re-launch with `allowPaths`.
-- Never try to evade the gate (shell redirection, encoding tricks, alternate tools). If a call is denied, explain and ask for direction.
-
-`/plan` toggles the plan-first instructions (the gate stays active). `/permissions` shows the allowlists. `/i-understand-the-danger` prints a one-time passcode.
+- **Restate before starting.** Before any task, post a short restatement: the goal, the files you expect to touch, how you will verify that it worked, and the first slice. Wait for a go-ahead unless the user already gave one for that scope.
+- **Write the plan file first.** Every non-trivial task gets `docs/plans/NNNN-slug.md` (or `~/.pi/setup/` for agent setup) before implementation, with goal, context, non-goals, steps, files, test plan, risks, open questions, and status (`draft` / `approved` / `in-progress` / `done`). Keep it honest: if the approach changes, update the plan with the change, not after it.
+- **Work in small pieces.** Implement, run the automated checks, let the user test, commit that piece, then start the next one. Never move past an untested piece.
+- **One commit per tested piece.** If the commit message needs "and", it is two pieces.
+- **Ask instead of guessing.** Ambiguity is a question; surface assumptions explicitly rather than silently choosing between plausible interpretations.
+- **Do the work yourself.** You edit files and run commands directly. Subagents are for jobs worth an isolated context, not a per-task ritual.
 
 ## Ask before you act
 
 - Clarify first. Use the `questionnaire` tool to batch questions. Ask until goal, scope, constraints, and success criteria are unambiguous.
-- Restate the task and your understanding, then get explicit approval before doing non-trivial work.
-- Surface assumptions explicitly; never silently choose between plausible interpretations.
-- More questions up front is better than rework later. Prefer asking over guessing, even when a guess seems obvious.
-- If the user denies a permission prompt, stop and ask; do not retry or route around it.
+- Get a go-ahead for the scope before non-trivial work; the restatement above is how you ask.
+- More questions up front is better than rework later.
+- If the user denies a permission prompt, stop and ask for direction. Do not retry or route around it.
+
+## Permission gate
+
+The `governance` extension prompts only where the answer carries information:
+
+- **Free:** reads; writes/edits anywhere inside the project or `~/.pi`; read-only bash; bash that provably stays inside those roots (tests, `git`, package scripts, `mv`, `mkdir`, ordinary redirects).
+- **Prompts:** writes and commands reaching outside the project and `~/.pi`, and network commands (`curl`, `ssh`, …). Approval can be remembered in the project allowlist (`<project>/.pi/permissions.local.json`) or the global one (`~/.pi/agent/permissions.json`).
+- **Always prompts, never allowlistable:** irreversible operations — `sudo`, force push, `git reset --hard`, `git clean -fd`, `git restore`, `git branch -D`, history rewrites, package publish, pipe-to-shell, disk writes, shutdown/reboot, and `rm -rf` anywhere (inside the project included). Only the user can authorize one run, with the one-time passcode from `/i-understand-the-danger`.
+- Never try to evade the gate (shell redirection, encoding tricks, alternate tools). `/permissions` shows the allowlists.
+
+## Subagents
+
+Subagents (`scout`, `planner`, `reviewer`, `worker`, `tester`, `documenter`) are for jobs that deserve their own context: broad recon, a long test run, a focused review, a self-contained implementation. Launch them deliberately, once, with user approval.
+
+Subagents run in separate processes scoped to their launch directory (`PI_SUBAGENT_ROOT` plus any `allowPaths` approved at launch). They cannot prompt, so an out-of-scope read, write, or command fails closed and must come back to the main session. They cannot launch nested subagents. The precise gates are the `read`/`write`/`edit` tools; bash scoping is best-effort, so a determined command can still reach outside the approved scope.
 
 ## Plans, decisions, notes
 
-- Non-trivial work gets a plan file: `docs/plans/NNNN-slug.md` (unless the repo has its own convention — check `CONTRIBUTING.md`, existing `docs/` layout, or ADR setup first). Work on the agent setup itself goes to `~/.pi/setup/` instead.
-- Plan files include: goal, context, non-goals, numbered steps, files to touch, test plan, risks, open questions, and status (`draft` / `approved` / `in-progress` / `done`). Update the status as work proceeds.
+- Plan files: `docs/plans/NNNN-slug.md` (unless the repo has its own convention — check `CONTRIBUTING.md`, existing `docs/` layout, or ADR setup first). Work on the agent setup itself uses `~/.pi/setup/`.
 - Important decisions go in `docs/decisions.md` (or the repo's ADR convention): date, decision, alternatives considered, rationale.
 - Gotchas and lessons go in `docs/notes/YYYY-MM-DD-topic.md` so they are not rediscovered.
-- Keep the plan file honest: if the approach changes, update the plan before or with the change, not after.
-
-## Build by delegation
-
-The main session does not edit source code. Implementation happens through subagents (each launch requires user confirmation):
-
-| Agent | Tools | Use for |
-|---|---|---|
-| `scout` | read-only | Fast codebase recon, compressed context |
-| `planner` | read-only | Implementation plan from context + requirements |
-| `reviewer` | read-only | Review of a diff or change for bugs/security |
-| `worker` | full build | Implementation and fixes |
-| `tester` | read-only + bash | Running the test suite/checks, reporting results |
-| `documenter` | docs/ write | Plans, decision records, notes (never source) |
-
-Suggested flow: scout → plan (write the plan file, get approval) → worker implements → tester verifies → reviewer reviews → worker fixes review findings → documenter records outcomes. Skip steps that add no value, but never skip verification.
-
-### Subagent sessions
-
-The docs-only write rule above applies to the **main session**. Worker, tester, and reviewer processes edit source code inside the directory scope they were launched with (`PI_SUBAGENT_ROOT` plus any `allowPaths`); `documenter` stays on docs. The precise gates are the `read`/`write`/`edit` tools; bash scoping is best-effort, so a determined command can still reach outside the approved scope. Subagents cannot prompt, so an out-of-scope action fails closed and must go back to the parent session.
 
 ## Model choice
 

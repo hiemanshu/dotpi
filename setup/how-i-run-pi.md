@@ -1,14 +1,14 @@
-# Plan-first pi setup — bootstrap summary
+# Colleague-loop pi setup — bootstrap summary
 
 A shareable overview of how this pi setup is configured. Built on **pi 1.2.x**. Everything lives in `~/.pi/`; no project code is modified.
 
 ## Design goals
 
-1. **Plan first.** Every session starts read-only-ish: explore, ask questions, write a plan. Build only after approval.
-2. **Build by delegation.** Source changes happen through subagents with explicit tool lists; the main session coordinates.
-3. **Ask, don't assume.** Clarifying questions are batched with a `questionnaire` tool; the agent restates the task and waits.
+1. **Confirm, then work.** Before a task the agent restates the goal, the files it will touch, how it will verify, and the first slice — then waits for a go-ahead unless the user already gave one.
+2. **Work in small tested pieces.** Implement, run the automated checks, let the user test, commit that piece, then start the next. One commit per tested piece.
+3. **Ask, don't assume.** Clarifying questions are batched with a `questionnaire` tool; ambiguity is a question, never a guess.
 4. **Durable memory.** Plans, decisions, and gotchas are files in the repo; setup notes live in `~/.pi/setup/`.
-5. **Explicit consent.** Writes and non-read-only commands prompt. Approvals can be learned into allowlists. Truly dangerous commands need a human passcode.
+5. **Consent where it matters.** Ordinary work inside the project and `~/.pi` runs prompt-free. Prompts remain for actions reaching outside those roots and for irreversible operations, which need a human passcode.
 
 ## What's installed
 
@@ -17,7 +17,7 @@ A shareable overview of how this pi setup is configured. Built on **pi 1.2.x**. 
 ├── AGENTS.md                      # global working agreement (loaded every session)
 ├── permissions.json               # global write allowlist (e.g. "~/.pi/")
 ├── extensions/
-│   ├── governance/                # custom: plan mode, permission gate, scoping, TUI chrome
+│   ├── governance/                # custom: permission gate, scoping, TUI chrome
 │   │   ├── index.ts               # tool_call gate, commands, lifecycle, prompts
 │   │   ├── utils.ts               # command classifier, path scoping, allowlist matching
 │   │   ├── footer.ts              # footer + working indicator
@@ -52,17 +52,17 @@ Implemented with the `tool_call` hook: every tool call is classified before it r
 ### Main session — auto-allowed
 
 - `read`, `grep`, `find`, `ls` — anywhere.
-- **Writes only** in `<project>/docs/`, `~/.pi/setup/`, `/tmp`, and the OS temp dir. Writes anywhere else inside the project, and anywhere inside `~/.pi` outside `setup/`, are **hard-blocked** with a "delegate to `worker`" message (no passcode path).
+- **Writes and edits inside the project and inside `~/.pi`** — the whole tree: source, config, extensions, agents, prompts, docs, `settings.json`. Writes outside both prompt.
 - Read-only bash from a minimal safe list: `cat head tail grep ls eza pwd wc diff stat du df tree which whereis type printenv uname whoami id date ps jq`, `rg` (no `--pre`), `find`/`fd` (no `-exec/-delete/-fprint`), `git status|log|diff|show|branch --show-current|remote -v|config --get|ls-files|rev-parse|describe|blame|shortlog|stash list`, `npm list|view|info|search|outdated|audit`, `node|python3 --version`.
-- `cd` into the project, `~/.pi`, the pi installation directory, `/tmp`, the OS temp dir, and configured `read` roots.
-- Redirections whose target is a free-write root, `mkdir` into a free-write root, and non-recursive `rm` inside `/tmp` or the OS temp dir.
+- Bash that provably stays inside the project or `~/.pi` even when it is not on the safe list: `node …/x.test.ts`, `npm test`, `git commit`, `mv`, `mkdir`, `cp`, and plain `>`, `>>`, `n>` redirects whose target is inside a trusted root.
+- `cd` into the project, `~/.pi`, the pi installation directory, `/tmp`, the OS temp dir, and configured `read` roots. Later segments of the same chain resolve relative paths against the directory reached.
 - The `questionnaire` tool.
 
-`sed`, `awk`, `sort`, `uniq`, `curl`, `wget`, `less`, and `file` are **not** auto-allowed: each can write a file or execute code with a single flag or positional argument. They prompt; allowlist the specific form you trust. `echo`/`printf` are safe (they cannot write without a redirect); a redirect is only stripped when its target is a free-write root, so `echo x > src/y` still prompts and chains like `ls; echo ---; grep … | head` stay prompt-free.
+`sed`, `awk`, `sort`, `uniq`, `curl`, `wget`, `less`, and `file` are **not** on the safe list: each can write a file or execute code with a single flag. Inside the project they still run if every path stays in scope; otherwise they prompt and can be allowlisted. `echo`/`printf` are safe (they cannot write without a redirect); a redirect is only stripped when its target is inside a trusted root. Network tools (`curl`, `wget`, `ssh`, `scp`, `rsync`, …) always prompt because they have no path to scope.
 
 ### Main session — prompts
 
-Every other write/edit, and every non-read-only command. Dialog offers: **allow once**, **remember this file/folder or exact command in the project**, **remember everywhere**, **deny**. Rules are stored in:
+Every write/edit outside the project and `~/.pi`, every bash command that reaches outside those roots, and every network command. Dialog offers: **allow once**, **remember this file/folder or exact command in the project**, **remember everywhere**, **deny**. Rules are stored in:
 
 - `<project>/.pi/permissions.local.json` — project scope
 - `~/.pi/agent/permissions.json` — global scope
@@ -71,17 +71,17 @@ Format:
 
 ```json
 {
-  "write": ["src/generated/", "/home/me/shared/notes/"],
-  "bash": ["npm test", "git status *"],
+  "write": ["~/Downloads/work/", "/home/me/shared/notes/"],
+  "bash": ["npm test", "curl https://example.com *"],
   "read": ["~/other-repo/"]
 }
 ```
 
-Write rules are exact files or directories ending in `/`; relative paths resolve from the project root. `read` rules only extend bash `cd` trust (they never grant writes). Bash rules are exact commands or prefix rules ending in ` *`. Compound commands (`&&`, `;`, `|`) can only be remembered exactly, so an approval can't bless whatever is appended.
+Write rules are exact files or directories ending in `/`; relative paths resolve from the project root. `read` rules extend the trusted roots for bash paths and `cd` (they never grant writes). Bash rules are exact commands or prefix rules ending in ` *`. Compound commands (`&&`, `;`, `|`) can only be remembered exactly, so an approval can't bless whatever is appended.
 
 ### Hard blocks
 
-Never auto-approved, regardless of allowlists: `sudo`, shutdown/reboot, disk formatting, `dd if=`, pipe-to-shell, force push, `git reset --hard`, `git clean -fd`, package publish, fork bombs, `chmod 777 /`, and `rm -rf` targeting anything outside the project. Quoted forms are normalised first, so `git push "--force"` is still caught.
+Never auto-approved and never allowlistable, regardless of scope: `sudo`, shutdown/reboot, disk formatting, `dd if=`, pipe-to-shell, force push (including `--force-with-lease`), `git reset --hard`, `git clean -fd`/`-fdx`, `git checkout .`/`git checkout -- .`, `git restore` (any form), `git branch -D`, `git filter-branch`/`git filter-repo`, package publish, fork bombs, `chmod 777 /`, and `rm -rf` **anywhere — inside the project included**. Quoted forms are normalised first, so `git push "--force"` is still caught.
 
 To allow one run, the user runs `/i-understand-the-danger`; it prints a one-time passcode (2 minutes, single use) that must be typed into the confirmation dialog. The model never sees the passcode.
 
@@ -102,33 +102,30 @@ The same extension runs inside the child and:
 - applies a persistent `bash` scope check: absolute paths, quoted paths, `cd` (including `cd --`), relative `../` paths, `--opt=value`, attached short-flag values, interpreters, and shell `-c` payloads are audited; unanalysable quoting fails closed,
 - blocks dangerous commands outright (no UI to authorize them),
 - cannot launch nested subagents,
-- does **not** get the main-session plan-first text injected and runs with plan mode off, so a worker edits rather than delegates.
+- gets no main-session context injection and fails closed when a call leaves its scope.
 
 Bash scoping is best-effort, not a security boundary: stdin payloads into an interpreter (`… | bash`), unlisted executors, and absolute paths embedded inside a payload string are not audited. The precise gates are the `read`/`write`/`edit` tools. A determined command can still reach outside the scope; keep subagent launches explicit because every launch is a user-approved, project-scoped process.
 
 If a task genuinely needs an outside path, the child reports it; the main session asks the user and re-launches with `allowPaths`, which is shown in the confirmation.
 
-### Modes and commands
+### Commands
 
 | Command | Effect |
 |---|---|
-| `/plan` | Toggle plan-first instructions (the gate stays active) |
 | `/permissions` | Show project and global allowlists |
 | `/footer` | Toggle the governance footer vs pi's default |
-| `/i-understand-the-danger` | One-time passcode for one hard-blocked command |
+| `/header` | Toggle the opencode-style title bar vs pi's default |
+| `/i-understand-the-danger` | One-time passcode for one irreversible command |
 
-Plan mode is on by default for every new session. The mode is persisted in the session transcript so resume keeps it.
+There is no plan mode and no `/plan` toggle. The confirmation loop (restate, plan file, small tested pieces) lives in `~/.pi/agent/AGENTS.md`, which loads every session.
 
 ## Workflow
 
-1. **Clarify.** Batch questions with `questionnaire`; restate goal/scope/non-goals.
+1. **Clarify and confirm.** Batch questions with `questionnaire`; restate goal, files, verification, and the first slice. Wait for a go-ahead unless it is already given for that scope.
 2. **Plan.** Write `docs/plans/NNNN-slug.md`: goal, context, non-goals, steps, files, test plan, risks, open questions, status (`draft` → `approved` → `in-progress` → `done`).
-3. **Approve.** The user reviews and approves the plan file.
-4. **Delegate.** `worker` implements → `tester` runs the suite → `reviewer` reviews the diff → `worker` fixes findings → `documenter` records outcomes.
-5. **Record.** Decisions in `docs/decisions.md` (date, decision, alternatives, rationale); gotchas in `docs/notes/`.
-6. **Verify.** Never skip tests; update the plan's status honestly.
-
-The prompt templates `/implement`, `/scout-and-plan`, `/implement-and-review`, and `/document` wrap common chains.
+3. **Work in small pieces.** Implement the first slice, run the automated checks, hand it to the user to test, commit that piece, then continue. Never move past an untested piece.
+4. **Record.** Decisions in `docs/decisions.md` (date, decision, alternatives, rationale); gotchas in `docs/notes/`. Update the plan file honestly as the work proceeds.
+5. **Subagents when they earn it.** `scout`, `planner`, `reviewer`, `worker`, `tester`, and `documenter` are for jobs that deserve an isolated context, launched once with user approval — not a per-task ritual.
 
 ## Agent roster
 
@@ -155,7 +152,8 @@ Agent definitions omit `model`, so they inherit the session model. Explicit `too
 5. Add `agents/`, `prompts/`, and `AGENTS.md`.
 6. Create the allowlist files (empty is fine) and gitignore `.pi/permissions.local.json`.
 7. Run `/reload` (or restart pi) and test:
-   - write outside the project → blocked/prompted,
+   - write outside the project and `~/.pi` → prompts,
+   - write and test inside the project → no prompt,
    - read-only `ls` → no prompt,
    - `sudo ...` → hard block; `/i-understand-the-danger` + passcode → allowed once,
    - subagent launch → confirmation with scope,
@@ -178,19 +176,20 @@ The governance extension is the only non-trivial code (~500 lines across `index.
 
 ## Security notes / known limits
 
-- Bash scoping is best-effort: file tools are enforced precisely, but absolute paths and `cd` are heuristics. A determined command can still read outside the project.
+- Bash scoping is best-effort: file tools are enforced precisely, but absolute paths and `cd` are heuristics. A determined command can still read outside the trusted roots.
 - Trusting `~/.pi` means the agent can edit its own allowlists and extensions. That is intentional for a personal setup; remove the rule if you don't want it.
-- Once a write-capable subagent is approved, it can modify anything inside the project without further prompts.
+- Once a subagent is approved, it can modify anything inside its launch scope without further prompts.
+- The always-prompt list is now the whole safety net for irreversible actions. Keep it long: too short is unrecoverable, and `rm -rf` is never auto-allowed, project or not.
 - There is no OS-level sandbox (pi's `sandbox` example exists but was not used).
 - Hard-blocked commands can never be authorized from inside a subagent.
 
 ## Tuning knobs
 
-- Hard-block list and read-only command patterns → `governance/utils.ts`.
-- Trusted scopes → `isInside(cwd, abs)` check in `governance/index.ts`; global `~/.pi` rule → `~/.pi/agent/permissions.json`.
+- Hard-block list, read-only safe list, and the in-scope bash check → `governance/utils.ts` (`dangerousReason`, `mainBashVerdict`).
+- Trusted scopes → `mainWriteVerdict` / `mainBashVerdict` in `governance/utils.ts` (the session cwd and the pi config root, `~/.pi`).
 - Prompt copy / dialog options → `askWritePermission`, `askBashPermission`, `handleHardBlock` in `governance/index.ts`.
 - Footer on/off → `/footer`; layout → `governance/footer.ts`.
-- Plan-mode instructions → `PLAN_CONTEXT` in `governance/index.ts` and `~/.pi/agent/AGENTS.md`.
+- Working-agreement text (confirmation loop, plan files, small pieces) → `~/.pi/agent/AGENTS.md`.
 - Agent models → add a `model:` field to any agent file (currently omitted to inherit).
 
 ## Keeping the config in git

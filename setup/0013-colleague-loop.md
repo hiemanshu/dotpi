@@ -1,7 +1,7 @@
 # 0013 — Colleague loop: confirm, discuss, then work without prompts
 
 - **Date:** 2026-10-27
-- **Status:** approved (2026-10-27) — one piece, starts once the other session's uncommitted `utils.ts` work is committed
+- **Status:** done (2026-10-27) — implemented in one piece, verified, not yet committed
 - **Owner:** hiemanshu
 - **Supersedes:** D-0029 (docs-only main-session writes), refines D-0002 (plan-first gate)
 
@@ -83,7 +83,7 @@ Everything on this list is either unrecoverable or destroys uncommitted work; th
 
 ## Test plan
 
-- [ ] Classifier suite green, including: edit inside project → allow; edit inside `~/.pi` → allow; edit in `~/Downloads` → ask; `node …/x.test.ts` inside project → allow; `git commit` inside project → allow; `cd ~/other` → prompt; each always-prompt entry → blocked regardless of allowlist.
+- [x] Classifier suite green, including: edit inside project → allow; edit inside `~/.pi` → allow; edit in `~/Downloads` → ask; `node …/x.test.ts` inside project → allow; `git commit` inside project → allow; `cd ~/other` → prompt; `rm -r` → ask; each always-prompt entry → blocked regardless of allowlist.
 - [ ] Live: one full slice (edit, test, commit) produces **zero** prompts.
 - [ ] Live: `~/Downloads/x` write prompts once and can be remembered; subagent launch still prompts once.
 - [ ] Live: `/plan` is gone; session start, reload, and `/permissions` still work; no plan-mode badge in the title bar.
@@ -101,3 +101,14 @@ Everything on this list is either unrecoverable or destroys uncommitted work; th
 2. Always-prompt list: as above, widened to destructive in-project actions.
 3. `~/.pi`: free to edit, extensions included.
 4. Sequencing: one piece, started after the other session's uncommitted `utils.ts` work is committed.
+
+## Verification (2026-10-27)
+
+- `grep -rn 'PLAN_CONTEXT\|planMode\|governance-mode\|plan flag' agent/extensions/governance agent/AGENTS.md` → **no output** (no hits left).
+- `node --experimental-strip-types classifier.test.ts` → `classifier tests passed: 425 cases` (was 373).
+- `node --experimental-strip-types throughput.test.ts` → `throughput tests passed (26)`.
+- `node --experimental-strip-types renderers.test.ts` → `railify tests passed`.
+- `node --experimental-strip-types --check index.ts utils.ts footer.ts throughput.ts` → clean (no output, exit 0).
+- `timeout 120 pi -p 'say hi'` → `Hi! 👋`, no stderr noise (the extension loads and the gate starts cleanly).
+- Live/TUI checks (reload required) are left unchecked above; they need a human at the keyboard.
+
