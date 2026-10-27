@@ -376,11 +376,15 @@ allowlist entry; that is the documented best-effort boundary.
 ## Outcome (2026-10-27)
 
 Implemented and reviewed over nine passes. `classifier.test.ts` passes 366
-cases; `throughput.test.ts` (unrelated 0012 work) passes 20. The extension
-loads cleanly (`pi --help` reports no load failure). Delivered:
+cases (373 after the echo/printf follow-up); `throughput.test.ts` (unrelated
+0012 work) passes 26. The extension loads cleanly (`pi --help` reports no load
+failure). Delivered:
 
 - main-session free writes limited to `docs/`, `~/.pi/setup/`, temp dirs, with
   a delegation block for source/config;
+- `echo`/`printf` kept on the safe list (they cannot write without a redirect,
+  and redirects outside free-write roots still prompt) after a reported false
+  positive on `ls; echo ---; grep … | head`;
 - symlinked docs/setup roots rejected;
 - minimal read-only bash safe list, `cd` into project/`~/.pi`/pi install/temp/
   `read` roots, free-write redirects + `mkdir`, non-recursive `rm` in temp;

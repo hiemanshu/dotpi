@@ -58,7 +58,7 @@ Implemented with the `tool_call` hook: every tool call is classified before it r
 - Redirections whose target is a free-write root, `mkdir` into a free-write root, and non-recursive `rm` inside `/tmp` or the OS temp dir.
 - The `questionnaire` tool.
 
-`sed`, `awk`, `sort`, `uniq`, `curl`, `wget`, `less`, `file`, `echo`, and `printf` are **not** auto-allowed: each can write a file or execute code with a single flag or positional argument. They prompt; allowlist the specific form you trust.
+`sed`, `awk`, `sort`, `uniq`, `curl`, `wget`, `less`, and `file` are **not** auto-allowed: each can write a file or execute code with a single flag or positional argument. They prompt; allowlist the specific form you trust. `echo`/`printf` are safe (they cannot write without a redirect); a redirect is only stripped when its target is a free-write root, so `echo x > src/y` still prompts and chains like `ls; echo ---; grep … | head` stay prompt-free.
 
 ### Main session — prompts
 

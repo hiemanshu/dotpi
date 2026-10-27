@@ -146,6 +146,11 @@ const SAFE_COMMAND_PATTERNS: RegExp[] = [
 	/^\s*fd\b/,
 	/^\s*ls\b/,
 	/^\s*eza\b/,
+	// `echo`/`printf` can only write through a redirect: harmless redirects are
+	// stripped first (free-write roots only) and every other one is rejected as
+	// unanalysable, so neither can escape the gate on its own.
+	/^\s*echo\b/,
+	/^\s*printf\b/,
 	/^\s*pwd\b/,
 	/^\s*wc\b/,
 	/^\s*diff\b/,

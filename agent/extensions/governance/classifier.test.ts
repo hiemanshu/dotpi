@@ -65,10 +65,10 @@ const safeCases: Array<[string, boolean]> = [
 	['DIST=/x head -2 file | grep -n "x|y" | head', true],
 	["ls -la 2>&1", true],
 	["cat file 2>&1", true],
-	// P6 (pass 6): `echo`/`printf` left the safe list, so redirects carried by
-	// `echo` now prompt; the redirect matrix below uses `cat` instead.
-	['echo ">"', false],
-	['echo "x > y"', false],
+	// P8 (pass 8): `echo`/`printf` are back on the safe list. They cannot write
+	// without a redirect, and a quoted operator is data, not a redirect.
+	['echo ">"', true],
+	['echo "x > y"', true],
 	['cat "a>b"', true],
 	['find . -name "*.lua" -print', true],
 	["git status", true],
@@ -119,8 +119,13 @@ const coreCases: Array<[string, boolean]> = [
 	["sort file", false],
 	["sort -o out in", false],
 	["uniq /tmp/a src/b.ts", false],
-	["echo hi", false],
-	["printf '%s\\n' hi", false],
+	["echo hi", true],
+	["printf '%s\\n' hi", true],
+	// P8: no redirect and no shell syntax, so a plain print is safe; the shell
+	// operators that make it unsafe still prompt.
+	["echo x | sh", false],
+	["echo x\\nrm -rf src", false],
+	["echo hi & rm -rf src", false],
 	["less file", false],
 	["more file", false],
 	["top -l 1", false],
@@ -253,26 +258,41 @@ const HOME_PI = path.join(process.env.HOME ?? os.homedir(), ".pi");
 
 /**
  * Pi's own installation root, derived the same way `index.ts` does it: walk up
- * from the running script to the `pi-coding-agent` package directory. When the
- * layout is not recognisable (e.g. running this test with plain `node`) the
- * install-root case is skipped instead of depending on a hardcoded path.
+ * from a real path to the `pi-coding-agent` package directory. The test script
+ * lives in ~/.pi rather than in the install, so fall back to the `pi` binary on
+ * PATH; when neither layout is recognisable the install-root cases are skipped
+ * instead of depending on a hardcoded path.
  */
-function piInstallRoot(): string | null {
-	const script = process.argv[1];
-	if (!script) return null;
-	let start: string;
+function walkToPiPackage(start: string): string | null {
+	let current: string;
 	try {
-		start = fs.realpathSync(script);
+		current = path.dirname(fs.realpathSync(start));
 	} catch {
 		return null;
 	}
-	let current = path.dirname(start);
 	while (true) {
 		if (path.basename(current) === "pi-coding-agent") return current;
 		const parent = path.dirname(current);
 		if (parent === current) return null;
 		current = parent;
 	}
+}
+
+function piInstallRoot(): string | null {
+	const fromScript = process.argv[1] ? walkToPiPackage(process.argv[1]) : null;
+	if (fromScript) return fromScript;
+	for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+		if (!dir) continue;
+		const bin = path.join(dir, "pi");
+		try {
+			fs.accessSync(bin, fs.constants.X_OK);
+		} catch {
+			continue;
+		}
+		const root = walkToPiPackage(bin);
+		if (root) return root;
+	}
+	return null;
 }
 
 const PI_INSTALL = piInstallRoot();
@@ -309,6 +329,22 @@ for (const [command, expected] of cdCases) {
 // Backward compatible default: only the project root is trusted for cd.
 check(isSafeBashCommand(`cd ${HOME_PI}/agent && ls`, ROOT), false, "cd outside default read root");
 
+// P8 regression: the reported chain (`cd <pi install>/… && ls; echo ---;
+// grep … | head`) is read-only, so it must not prompt because of the plain
+// `echo ---` separator. Skipped when the pi install layout is not detectable.
+if (PI_INSTALL) {
+	const scoped = path.join(PI_INSTALL, "libexec", "lib", "node_modules", "@earendil-works");
+	check(
+		isSafeBashCommand(
+			`cd ${scoped} && ls; echo ---; grep -rln "x" --include=*.d.ts . | head`,
+			ROOT,
+			[ROOT, HOME_PI, PI_INSTALL, "/tmp", os.tmpdir()],
+		),
+		true,
+		"read-only chain with an echo separator is safe",
+	);
+}
+
 const redirectCases: Array<[string, boolean]> = [
 	["cat f > /tmp/x", true],
 	["cat f >> /tmp/x", true],
@@ -323,10 +359,12 @@ const redirectCases: Array<[string, boolean]> = [
 	["cat src/x > src/y", false],
 	["cat f > ~/other/x", false],
 	["cat f > /tmp/$(rm -rf /)", false],
-	// P6: `echo` is no longer safe, so even a redirect into a free-write root
-	// does not rescue it.
-	["echo hi > /tmp/x", false],
-	["echo hi > docs/note.md", false],
+	// P8: `echo` is safe again, and a redirect is only harmless when it lands in
+	// a free-write root; a project file is not one.
+	["echo hi > /tmp/x", true],
+	["echo hi > docs/note.md", true],
+	["echo hi > file", false],
+	["echo hi > src/a.ts", false],
 ];
 
 runCases(redirectCases, "isSafeBashCommand", (command) => isSafeBashCommand(command, ROOT, undefined, FREE_ROOTS));
