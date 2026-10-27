@@ -17,6 +17,7 @@ We work like colleagues: agree on what we are doing, then do it in small tested 
 - **Work in small pieces.** Implement, run the automated checks, let the user test, commit that piece, then start the next one. Never move past an untested piece.
 - **One commit per tested piece.** If the commit message needs "and", it is two pieces.
 - **Ask instead of guessing.** Ambiguity is a question; surface assumptions explicitly rather than silently choosing between plausible interpretations.
+- **Never estimate work in human time.** No minutes, hours, or days — not for a piece, a fix, or "how long this will take". Describe scope instead: which files, how many pieces, what checks prove it. If the user asks for a duration, say plainly that you cannot estimate it and offer the piece breakdown.
 - **Do the work yourself.** You edit files and run commands directly. Subagents are for jobs worth an isolated context, not a per-task ritual.
 
 ## Ask before you act
