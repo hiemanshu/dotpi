@@ -21,7 +21,7 @@ project or `~/.pi`, or is irreversible. Enforced with `tool_call` hooks.
   - deny
 - Always prompts (never allowlistable, even inside the project) for the irreversible operations: `sudo`, system power commands, disk formatting, `dd if=`, pipe-to-shell, force push (including `--force-with-lease`), `git reset --hard`, `git clean -fd`/`-fdx`, `git checkout .`/`git checkout -- .`, `git restore` (any form), `git branch -D`, `git filter-branch`/`git filter-repo`, package publish, fork bombs, `chmod 777 /`, and `rm -rf` **anywhere** (inside the project too). The user can authorize one run by running `/i-understand-the-danger` (prints a one-time passcode, 2 min, single use) and typing it into the prompt.
 - Scopes subagent processes to `PI_SUBAGENT_ROOT` + `PI_SUBAGENT_ALLOW_PATHS` for writes, reads, and bash (`cd` / absolute path checks). Out-of-scope reads and writes fail closed because subprocesses have no UI to prompt.
-- Hard-blocks `powershell` and any tool the gate does not know, in **both** the main session and subagent processes. `powershell` gets a message pointing at `bash`; unknown tools fail closed because there is no policy for them.
+- Hard-blocks `powershell` and any tool the gate does not know, in **both** the main session and subagent processes. `powershell` gets a message pointing at `bash`; unknown tools fail closed because there is no policy for them. The web search MCP tools (`mcp__websearch__*`) are allowed by name prefix in both processes: they only search and fetch, and routing them through `codemode` would let a script reach `bash`/`write` and bypass the gate.
 
 ## Commands
 

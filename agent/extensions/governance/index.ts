@@ -57,6 +57,16 @@ const PASSCODE_TTL_MS = 2 * 60 * 1000;
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 /** Tools the main gate knows how to reason about; anything else fails closed. */
 const MAIN_ALLOWED_TOOLS = new Set([...READ_TOOLS, "subagent", "questionnaire", "ask", "confirm"]);
+/**
+ * MCP tools that are read-only by construction: the web search server only
+ * searches and fetches, so they are allowed by name prefix rather than being
+ * pushed through `codemode` (which could reach `bash`/`write` and bypass this gate).
+ */
+const ALLOWED_MCP_PREFIXES = ["mcp__websearch__"];
+
+function isAllowedTool(tool: string): boolean {
+	return MAIN_ALLOWED_TOOLS.has(tool) || ALLOWED_MCP_PREFIXES.some((prefix) => tool.startsWith(prefix));
+}
 /** Tools a subagent may use; everything else (including `powershell`) fails closed. */
 const SUBAGENT_ALLOWED_TOOLS = new Set(["edit", "write", "bash", ...READ_TOOLS]);
 /** Footer repaint ceiling while streaming (~10 Hz); no timer, extra frames are dropped. */
@@ -573,7 +583,7 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 		}
 
 		// Fail closed: a tool the gate does not understand never runs unattended.
-		if (!MAIN_ALLOWED_TOOLS.has(tool)) {
+		if (!isAllowedTool(tool)) {
 			return {
 				block: true,
 				reason: [
@@ -652,7 +662,7 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 		}
 
 		// Fail closed: a tool without a subagent policy never runs unattended.
-		if (!SUBAGENT_ALLOWED_TOOLS.has(tool)) {
+		if (!SUBAGENT_ALLOWED_TOOLS.has(tool) && !isAllowedTool(tool)) {
 			return {
 				block: true,
 				reason: `Blocked: tool "${tool}" has no subagent policy, so it fails closed. ${scopeNote}`,

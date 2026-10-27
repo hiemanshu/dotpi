@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "websearch": {
+      "url": "https://search.parallel.ai/mcp",
+      "exposure": "direct",
+      "description": "Web search and web fetch (Parallel, via opencode's search backend). Read-only."
+    }
+  }
+}
