@@ -2,6 +2,10 @@
  * Live throughput for the footer: time to first token (TTFT) and a
  * TTFT-excluded generation rate. Pure logic with an injectable clock so the
  * behaviour is testable without a running TUI or a provider.
+ *
+ * Per D-0028 the rate counts every token the model generates — text, thinking,
+ * and tool-call argument JSON — so it lines up with `usage.output`. Tool results
+ * (input side) and nested tool usage are not counted.
  */
 
 /** Smallest generation window; keeps the first delta from reporting a huge rate. */
@@ -89,6 +93,24 @@ export function formatRate(tokensPerSecond: number): string {
 export function formatTtft(ms: number): string {
 	const seconds = Number.isFinite(ms) && ms > 0 ? ms / 1000 : 0;
 	return `${seconds.toFixed(1)}s`;
+}
+
+/**
+ * Footer segment as plain text, colour-free so it is testable: `⚡` + `≈` (the
+ * rate includes startup) + `~` (the rate came from a character estimate) +
+ * rate. `full` carries the unit and the ttft, `compact` drops both so the
+ * segment survives a narrow footer. Null when there is nothing to show.
+ */
+export function throughputParts(
+	sample: ThroughputSample | null | undefined,
+): { full: string; compact: string } | null {
+	if (!sample || !Number.isFinite(sample.tokensPerSecond) || sample.tokensPerSecond <= 0) return null;
+	const prefix = `${sample.effective ? "≈" : ""}${sample.estimated ? "~" : ""}${formatRate(sample.tokensPerSecond)}`;
+	const ttft = sample.ttftMs != null ? formatTtft(sample.ttftMs) : null;
+	return {
+		full: ttft ? `⚡${prefix} tok/s · ${ttft} ttft` : `⚡${prefix} tok/s`,
+		compact: ttft ? `⚡${prefix} · ${ttft}` : `⚡${prefix}`,
+	};
 }
 
 export function createThroughputTracker(clock: () => number = () => performance.now()): ThroughputTracker {

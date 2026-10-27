@@ -4,7 +4,7 @@
  */
 
 import assert from "node:assert";
-import { createThroughputTracker, formatRate, formatTtft } from "./throughput.ts";
+import { createThroughputTracker, formatRate, formatTtft, type ThroughputSample, throughputParts } from "./throughput.ts";
 
 let passed = 0;
 
@@ -333,6 +333,63 @@ test("formatters", () => {
 	assert.equal(formatTtft(900), "0.9s");
 	assert.equal(formatTtft(1249), "1.2s");
 	assert.equal(formatTtft(0), "0.0s");
+});
+
+/** A representative sample; the footer tests override only what they render. */
+const SAMPLE: ThroughputSample = {
+	output: 142,
+	ttftMs: 900,
+	genMs: 1000,
+	tokensPerSecond: 142.4,
+	estimated: false,
+	effective: false,
+};
+
+function sampleWith(overrides: Partial<ThroughputSample>): ThroughputSample {
+	return { ...SAMPLE, ...overrides };
+}
+
+test("throughputParts renders the full and compact ttft forms", () => {
+	const parts = throughputParts(SAMPLE);
+	assert.ok(parts);
+	assert.equal(parts.full, "⚡142 tok/s · 0.9s ttft");
+	assert.equal(parts.compact, "⚡142 · 0.9s");
+});
+
+test("throughputParts drops ttft when it is unknown", () => {
+	const parts = throughputParts(sampleWith({ ttftMs: null }));
+	assert.ok(parts);
+	assert.equal(parts.full, "⚡142 tok/s");
+	assert.equal(parts.compact, "⚡142");
+});
+
+test("throughputParts marks an estimated rate with ~", () => {
+	const parts = throughputParts(sampleWith({ estimated: true }));
+	assert.ok(parts);
+	assert.equal(parts.full, "⚡~142 tok/s · 0.9s ttft");
+	assert.equal(parts.compact, "⚡~142 · 0.9s");
+});
+
+test("throughputParts marks a rate that includes startup with ≈", () => {
+	const parts = throughputParts(sampleWith({ ttftMs: null, effective: true, tokensPerSecond: 55.4 }));
+	assert.ok(parts);
+	assert.equal(parts.full, "⚡≈55 tok/s");
+	assert.equal(parts.compact, "⚡≈55");
+});
+
+test("throughputParts renders ≈~ when the rate is estimated and includes startup", () => {
+	const parts = throughputParts(sampleWith({ ttftMs: null, effective: true, estimated: true }));
+	assert.ok(parts);
+	assert.equal(parts.full, "⚡≈~142 tok/s");
+	assert.equal(parts.compact, "⚡≈~142");
+});
+
+test("throughputParts hides a missing or zero-rate sample", () => {
+	assert.equal(throughputParts(null), null);
+	assert.equal(throughputParts(undefined), null);
+	assert.equal(throughputParts(sampleWith({ tokensPerSecond: 0 })), null);
+	assert.equal(throughputParts(sampleWith({ tokensPerSecond: Number.NaN })), null);
+	assert.equal(throughputParts(sampleWith({ tokensPerSecond: -3 })), null);
 });
 
 console.log(`throughput tests passed (${passed})`);

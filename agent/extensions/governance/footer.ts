@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { formatRate, formatTtft, type ThroughputSnapshot } from "./throughput.ts";
+import { throughputParts, type ThroughputSnapshot } from "./throughput.ts";
 
 export interface TitleState {
 	planMode: boolean;
@@ -32,16 +32,15 @@ function formatTokens(count: number): string {
 
 /**
  * `⚡142 tok/s · 0.9s ttft` — accent while a reply streams, muted for the last
- * completed call, `~` when the rate came from a character estimate. Hidden
- * before the first measured call and without the ttft part when it is unknown.
+ * completed call. `≈` marks a rate that still includes startup (no ttft known),
+ * `~` a rate estimated from streamed characters. When the full form does not fit
+ * the left group the segment falls back to `⚡142 · 0.9s`, and it is hidden
+ * entirely before the first measured call.
  */
-function throughputSegment(snapshot: ThroughputSnapshot, theme: Theme): string | null {
-	const sample = snapshot.sample;
-	if (!sample || !Number.isFinite(sample.tokensPerSecond) || sample.tokensPerSecond <= 0) return null;
-	const rate = `${sample.estimated ? "~" : ""}${formatRate(sample.tokensPerSecond)} tok/s`;
-	const parts = [`⚡${rate}`];
-	if (sample.ttftMs != null) parts.push(`${formatTtft(sample.ttftMs)} ttft`);
-	return theme.fg(snapshot.live ? "accent" : "muted", parts.join(" · "));
+function throughputSegment(snapshot: ThroughputSnapshot, theme: Theme, form: "full" | "compact"): string | null {
+	const parts = throughputParts(snapshot.sample);
+	if (!parts) return null;
+	return theme.fg(snapshot.live ? "accent" : "muted", parts[form]);
 }
 
 /** Color the streaming spinner to match the current mode. TUI only. */
@@ -81,8 +80,8 @@ export function installGovernanceTitleBar(ctx: ExtensionContext, getState: () =>
 }
 
 /**
- * One-line footer: mode badge, context usage, session totals and live
- * throughput on the left; git branch and model on the right. TUI only.
+ * One-line footer: session title, context usage, live throughput and session
+ * totals on the left; git branch and cost on the right. TUI only.
  */
 export function installGovernanceFooter(
 	ctx: ExtensionContext,
@@ -119,19 +118,23 @@ export function installGovernanceFooter(
 				const titleStyled =
 					theme.fg("accent", title) + (state.passcodeActive ? ` ${theme.fg("warning", "🔑")}` : "");
 				const separator = theme.fg("borderMuted", "  ·  ");
-				const leftParts = [
-					titleStyled,
-					theme.fg("muted", ctxLabel),
-					theme.fg("muted", `↑${formatTokens(input)}  ↓${formatTokens(output)}`),
-				];
-				const tps = throughputSegment(state.throughput(), theme);
-				if (tps) leftParts.push(tps);
-				const left = `  ${leftParts.join(separator)}`;
+				const snapshot = state.throughput();
+				const tokens = `↑${formatTokens(input)}  ↓${formatTokens(output)}`;
+				// Throughput sits before the totals so it survives a narrow footer.
+				const buildLeft = (form: "full" | "compact"): string => {
+					const parts = [titleStyled, theme.fg("muted", ctxLabel)];
+					const tps = throughputSegment(snapshot, theme, form);
+					if (tps) parts.push(tps);
+					parts.push(theme.fg("muted", tokens));
+					return `  ${parts.join(separator)}`;
+				};
 				const branch = footerData.getGitBranch();
 				const rightParts = branch ? [`⎇ ${branch}`, `$${cost.toFixed(3)}`] : [`$${cost.toFixed(3)}`];
 				const right = `${theme.fg("muted", rightParts.join(separator))}  `;
 
 				const maxLeft = Math.max(1, width - visibleWidth(right) - 1);
+				let left = buildLeft("full");
+				if (visibleWidth(left) > maxLeft) left = buildLeft("compact");
 				const clippedLeft = truncateToWidth(left, maxLeft, "…");
 				const gap = " ".repeat(Math.max(1, width - visibleWidth(clippedLeft) - visibleWidth(right)));
 				const rule = theme.fg("borderMuted", "─".repeat(Math.max(1, width)));

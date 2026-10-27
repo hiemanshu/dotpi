@@ -1,7 +1,7 @@
 # 0012 — Live throughput + TTFT in the governance footer
 
 - **Date:** 2026-10-27
-- **Status:** in-review (fix slices A/B)
+- **Status:** in-review (awaiting TUI check)
 - **Owner:** hiemanshu
 
 ## Resolved open questions (approved 2026-10-27)
@@ -80,15 +80,17 @@ Automated checks passed, but review found five must-fix issues. Rather than patc
 6. `formatRate` boundary: `9.96` renders `10`, not `10.0`.
 
 **Slice B — wiring and rendering (`index.ts`, `footer.ts`, README), deferred until plan 0011 (permission friction) is committed** because both touch `index.ts`:
-1. Anchor TTFT at `before_provider_request`, pass that timestamp into `start()`.
-2. Count thinking text and tool-call argument JSON in the delta fallback (code points, not UTF-16 units) so thinking-heavy and tool-call-only messages show a live number instead of staying blank until `message_end`; reset `lastRenderAt` per stream.
-3. Render `≈` for `effective` samples; abbreviate to `⚡142 · 1.2s` and move the segment ahead of `↑in ↓out` at narrow widths.
+- [x] 1. Anchor TTFT at `before_provider_request`, pass that timestamp into `start()`.
+- [x] 2. Count thinking text and tool-call argument JSON in the delta fallback (code points, not UTF-16 units) so thinking-heavy and tool-call-only messages show a live number instead of staying blank until `message_end`; reset `lastRenderAt` per stream.
+- [x] 3. Render `≈` for `effective` samples; abbreviate to `⚡142 · 1.2s` and move the segment ahead of `↑in ↓out` at narrow widths.
 
 **Scope (resolved, D-0028):** the rate counts text + thinking + tool-call JSON, matching `usage.output` exactly; tool results (input-side) and nested tool usage are excluded; display stays per assistant message (live = streaming, idle = last completed), so a tool-heavy turn may leave a small tool-call rate on screen.
 
 **Commit rule:** one commit per slice, landed only after hiemanshu tests it, and never mixed with the permission-friction work sharing the tree.
 
 **Slice A status:** confirmed by hiemanshu (2026-10-27) after the 20-case suite and the `/tmp/slice-a-demo.ts` black-box output. Commit held until plan 0011 (permission friction) lands its own commit; the slice A commit stages exactly `agent/extensions/governance/throughput.ts` and `throughput.test.ts`.
+
+**Slice B status:** implemented and headlessly verified 2026-10-27 — `throughput.test.ts` 26 cases (20 old + 6 for `throughputParts`), `classifier.test.ts` 373 cases, `renderers.test.ts` passes, `--check` clean on `throughput.ts`/`footer.ts`/`index.ts`, and `pi -p 'say hi'` ran with no stdout/stderr noise from the new handlers. Still needs a human at a real terminal: (a) the segment turning accent → muted when a reply finishes, (b) 60/80/120-column layouts, including the `⚡142 · 0.9s` compact fallback and the throughput-before-totals order, (c) `before_provider_request` TTFT plausibility on a real provider, and (d) that classifier/title/compaction requests do not disturb the footer (they only set the pending timestamp and are overwritten by the next assistant message's `start()`).
 
 ## Risks
 

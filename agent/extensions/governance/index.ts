@@ -63,7 +63,10 @@ const MAIN_ALLOWED_TOOLS = new Set([...READ_TOOLS, "subagent", "questionnaire", 
 const SUBAGENT_ALLOWED_TOOLS = new Set(["edit", "write", "bash", ...READ_TOOLS]);
 /** Footer repaint ceiling while streaming (~10 Hz); no timer, extra frames are dropped. */
 const RENDER_INTERVAL_MS = 100;
-/** Rough characters-per-token used when a provider reports usage only at the end. */
+/**
+ * Rough characters-per-token used when a provider reports usage only at the end;
+ * the character count covers text, thinking, and tool-call JSON (D-0028).
+ */
 const CHARS_PER_TOKEN = 4;
 
 const PLAN_CONTEXT = `[PLAN MODE ACTIVE — user's default plan-first mode]
@@ -181,7 +184,8 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 	let footerHandle: FooterHandle | undefined;
 	let lastRenderAt = 0;
 	let streamedChars = 0;
-	let seenTextLength = 0;
+	/** `before_provider_request` timestamp; the request, not `message_start`, anchors TTFT. */
+	let pendingRequestStartedAt: number | null = null;
 
 	installBlockRenderers(pi);
 	installUserMessageRail(pi, () => userRailEnabled);
@@ -699,41 +703,37 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 	// Live throughput (footer segment)
 	// -----------------------------------------------------------------------
 
-	/** Length of the cumulative text so far; deltas are derived from its growth. */
-	function assistantTextLength(message: AssistantMessage): number {
-		const content = message.content;
-		if (!Array.isArray(content)) return 0;
-		let length = 0;
-		for (const block of content) {
-			if (block.type === "text" && typeof block.text === "string") length += block.text.length;
-		}
-		return length;
-	}
+	// Fires before every provider HTTP call, including classifier, compaction, and
+	// title requests, so it only records a timestamp: start() belongs to the
+	// assistant message that actually follows.
+	pi.on("before_provider_request", () => {
+		pendingRequestStartedAt = performance.now();
+	});
 
 	pi.on("message_start", (event) => {
 		const message = event.message as AssistantMessage | undefined;
 		if (!message || message.role !== "assistant") return;
-		throughput.start();
+		// Anchor TTFT at the request, not here: durationMs counts from stream creation.
+		throughput.start(pendingRequestStartedAt ?? undefined);
+		pendingRequestStartedAt = null;
 		streamedChars = 0;
-		seenTextLength = 0;
+		lastRenderAt = 0;
 	});
 
 	pi.on("message_update", (event, ctx) => {
 		const message = event.message as AssistantMessage | undefined;
 		if (!message || message.role !== "assistant") return;
 
-		const reported = message.usage?.output ?? 0;
-		let output = reported;
-		if (!(output > 0)) {
-			// Fallback for providers that only send usage in the final chunk: count
-			// the growth of the cumulative text and estimate tokens from it.
-			const length = assistantTextLength(message);
-			if (length > seenTextLength) {
-				streamedChars += length - seenTextLength;
-				seenTextLength = length;
-			}
-			output = streamedChars / CHARS_PER_TOKEN;
+		// Fallback for providers that only send usage in the final chunk: count every
+		// streamed delta (text, thinking, tool-call JSON) and estimate tokens from it.
+		// Code points, not UTF-16 units, to stay close to the token count.
+		const deltaEvent = event.assistantMessageEvent as { type?: unknown; delta?: unknown } | undefined;
+		if (typeof deltaEvent?.type === "string" && deltaEvent.type.endsWith("_delta")) {
+			if (typeof deltaEvent.delta === "string") streamedChars += [...deltaEvent.delta].length;
 		}
+
+		const reported = message.usage?.output ?? 0;
+		const output = reported > 0 ? reported : streamedChars / CHARS_PER_TOKEN;
 
 		const sample = throughput.update({ output }, !(reported > 0));
 		if (!sample) return;
