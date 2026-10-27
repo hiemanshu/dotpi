@@ -111,7 +111,7 @@ Decisions that shape the project. Newest at the bottom. Each entry: date, decisi
 ## D-0009 — Writes: any project's cwd plus `~/.pi` are trusted
 
 - **Date:** 2026-10-16
-- **Status:** accepted
+- **Status:** superseded by D-0029
 
 **Decision:** The governance gate pre-approves writes anywhere inside the current project (source included) and anywhere under `~/.pi` from any project (via the global allowlist). Writes outside the current project — other than `~/.pi` — and all non-read-only shell commands still require approval. Source edits remain delegated to subagents by workflow convention, not by the gate.
 
@@ -167,7 +167,7 @@ Decisions that shape the project. Newest at the bottom. Each entry: date, decisi
 ## D-0013 — Path-scoped bash trust for `~/.pi`
 
 - **Date:** 2026-10-17
-- **Status:** accepted
+- **Status:** superseded by D-0029
 
 **Decision:** A bash command whose absolute (or `~`) path arguments all resolve inside the pi config root (`~/.pi`) runs without prompting, even when it is not on the read-only list. `rm -rf` targets inside a trusted root (project cwd or `~/.pi`) are no longer hard-blocked. Hard blocks still apply everywhere else; commands with only relative paths, or that touch any other path, keep the normal approval flow.
 
@@ -349,3 +349,45 @@ The split uses an explicit per-frame `basis` (58% chat / 42% code) because pi-tu
 **Alternatives:** store absolute home paths (machine-specific); ignore permissions and recreate every rule by hand.
 
 **Rationale:** Keeps the config portable without making the global allowlist part of the shared repo by default.
+
+---
+
+## D-0027 — Throughput is generation-only rate, shown live in the footer
+
+- **Date:** 2026-10-27
+- **Status:** accepted
+
+**Decision:** Show `⚡<rate> tok/s · <ttft>s ttft` in the governance footer's left group (after `↑in ↓out`). The rate excludes time-to-first-token: output tokens ÷ (first delta → last delta), so slow starts and slow generation stay distinguishable. While streaming it renders in accent; when idle the last completed call's numbers stay visible in muted color. Missing mid-stream `usage.output` falls back to a character-based estimate rendered with a `~` prefix. In-memory only: nothing is persisted to session entries.
+
+**Alternatives:** effective rate (output ÷ full `durationMs`, TTFT included) — cheaper but conflates start latency with generation speed; a `/tps` history command — deferred; no live display, retrospective analysis only — rejected as the requested behavior.
+
+**Rationale:** The two numbers answer different questions (provider speed vs. queue/TTFT), the footer is the only always-visible surface, and the fallback keeps the display honest on providers that report usage only in the final chunk.
+
+---
+
+## D-0028 — Throughput covers every generated token; the footer stays per-call
+
+- **Date:** 2026-10-27
+- **Status:** accepted
+
+**Decision:** The `⚡ tok/s` number counts everything the model emitted in one call — visible text, thinking/reasoning, and tool-call argument JSON — because that is exactly what `usage.output` reports (`reasoning` is a subset of `output`, per pi's message types). Tool *results* are prompt-side and land in `usage.input`; nested model work performed by a tool (subagents, classifiers) carries its own `usage` on the tool-result message and is excluded. Display stays per assistant message: live = the streaming message, idle = the last completed message, even when a tool-heavy turn ends on a small tool-call message.
+
+**Alternatives:** exclude `reasoning` from the numerator (higher, spikier, and no longer matches `usage.output`); aggregate a whole user turn into one number (hides per-call variance, needs turn state in the tracker); show the last text-bearing message instead of the last message (mismatch between live and idle semantics).
+
+**Rationale:** Parity with `usage.output` means the live estimate, the final number, and any later session analysis all agree. Keeping per-call semantics is honest about what was measured, and the tool-call-stub case is a visible reminder of how much work the model did rather than a wrong number.
+
+---
+
+## D-0029 — Docs-only main-session writes; prompt-free reads; best-effort bash scope
+
+- **Date:** 2026-10-27
+- **Status:** accepted
+- **Supersedes:** D-0009 (whole-project write trust), D-0013 (path-scoped bash trust)
+
+**Decision:** The main session writes freely only inside `<project>/docs/`, `~/.pi/setup/`, `/tmp`, and `os.tmpdir()`; everything else inside the project and inside `~/.pi` outside `setup/` is hard-blocked with a "delegate to `worker`" message, with no passcode path. Project or `~/.pi` free-write roots are rejected when they are symlinks to somewhere else. Read-only bash may `cd` into the project, `~/.pi`, the pi installation directory, temp dirs, and configured `read` roots, and may redirect/`mkdir` inside free-write roots and non-recursively `rm` inside temp dirs. The auto-safe command list is a minimal read-only core; every command that can write or execute with one flag or positional argument (`sed`, `awk`, `sort`, `uniq`, `curl`, `wget`, `less`, `file`, `echo`, `printf`, …) prompts. Subagent bash scope honours `allowPaths`, audits quoted paths, `cd --`, relative paths, `--opt=value`, attached short-flag values, and interpreter code-exec flags, and fails closed on unanalysable quoting. Subagents do not receive the plan-first text and run with plan mode off.
+
+**Alternatives:** keep D-0009's whole-project trust and rely on convention (the original setup had the docs-only rule only in prose, which the gate silently contradicted); keep patching individual `sed`/`awk` script forms (five review rounds each found another one-flag or one-token write: `sed -n -i`, `s///e`, `1W`, `-f`, `$'…'`, letter delimiters, `uniq in out`, `git log --output`, `curl -D`, `less -o`, `tree -oout`, quoted flags, `python3.12 -c`); treat bash as a security boundary and sandbox it.
+
+**Rationale:** The main session's output is plans, decisions, and notes; everything else is a build change and belongs in a reviewable subagent diff. Making docs frictionless while blocking source mechanically matches the working agreement and removes the contradiction that let source edits through silently. Automating writes to `/tmp` and reads anywhere keeps exploration prompt-free. The shell classifier is best-effort by nature — every additional auto-allowed command is a new write primitive — so the safe list stays small, the writes that remain are bound to free-write roots, and the precise boundary is the `edit`/`write` tool plus one user-approved, project-scoped subagent launch.
+
+**Consequence:** an emergency edit to `~/.pi/agent` from the main session now requires a `worker` launch. `sed`/`awk` one-liners and every command with an output flag prompt by default; allowlist the exact form if it becomes routine. Interpreters are allowed in subagents only with read-only flags and a script path inside the scope; stdin payloads and unlisted executors are explicitly out of scope.

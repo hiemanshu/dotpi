@@ -3,12 +3,15 @@
  *
  * Defaults:
  *   - Every session starts in plan mode.
- *   - Writes anywhere inside the current project are pre-approved (source included).
- *   - ~/.pi is writable from any project via the global allowlist.
+ *   - Main-session writes are free inside `<cwd>/docs/`, `~/.pi/setup/`, `/tmp`,
+ *     and `os.tmpdir()`. Source/config writes inside the project or `~/.pi`
+ *     outside those roots are hard-blocked: they go through a worker subagent.
  *   - Any other write/edit and any non-read-only bash command asks the user.
  *     Approvals can be remembered in the project allowlist
  *     (<project>/.pi/permissions.local.json) or the global allowlist
  *     (<agent-dir>/permissions.json).
+ *   - Read-only bash may `cd` into the project, `~/.pi`, the pi installation
+ *     directory, temp dirs, and configured `read` roots.
  *   - A small never-allow list is hard-blocked. The user can authorize a single
  *     run with the one-time passcode from /i-understand-the-danger.
  *   - Subagent processes (env PI_GOVERNED_SUBAGENT=1) are scoped to their
@@ -16,32 +19,52 @@
  *     They cannot prompt, so out-of-scope actions fail closed.
  */
 
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { TextContent } from "@earendil-works/pi-ai";
+import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	type AllowRules,
 	addRule,
-	bashPathsAllInsideRoots,
 	bashScopeEscape,
 	dangerousReason,
 	displayPath,
+	expandHome,
+	freeWriteRoots,
 	homeRelative,
 	isInside,
 	isCompoundCommand,
 	isSafeBashCommand,
 	loadRules,
+	mainWriteVerdict,
 	matchBashRule,
 	matchWriteRule,
 	resolveFromCwd,
+	resolveWritePath,
 	saveRules,
+	uniqueResolved,
 } from "./utils.ts";
-import { applyWorkingIndicator, installGovernanceFooter, installGovernanceTitleBar } from "./footer.ts";
+import {
+	applyWorkingIndicator,
+	installGovernanceFooter,
+	installGovernanceTitleBar,
+	type FooterHandle,
+} from "./footer.ts";
 import { installBlockRenderers, installUserMessageRail } from "./renderers.ts";
+import { createThroughputTracker } from "./throughput.ts";
 
 const PASSCODE_TTL_MS = 2 * 60 * 1000;
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
+/** Tools the main gate knows how to reason about; anything else fails closed. */
+const MAIN_ALLOWED_TOOLS = new Set([...READ_TOOLS, "subagent", "questionnaire", "ask", "confirm"]);
+/** Tools a subagent may use; everything else (including `powershell`) fails closed. */
+const SUBAGENT_ALLOWED_TOOLS = new Set(["edit", "write", "bash", ...READ_TOOLS]);
+/** Footer repaint ceiling while streaming (~10 Hz); no timer, extra frames are dropped. */
+const RENDER_INTERVAL_MS = 100;
+/** Rough characters-per-token used when a provider reports usage only at the end. */
+const CHARS_PER_TOKEN = 4;
 
 const PLAN_CONTEXT = `[PLAN MODE ACTIVE — user's default plan-first mode]
 
@@ -50,7 +73,7 @@ Working rules for this session:
 - Ask clarifying questions BEFORE proposing work. Use the questionnaire tool to batch them; never silently assume. When something is ambiguous, ask.
 - Non-trivial work needs a plan file under docs/ (default: docs/plans/NNNN-slug.md, unless the repo has a different convention). Include goal, context, non-goals, steps, files to touch, test plan, risks, open questions, and status.
 - Record important decisions in docs/decisions.md (or the repo's convention): date, decision, alternatives considered, rationale. Record gotchas in docs/notes/ so they are not rediscovered.
-- Writes anywhere inside the current project are pre-approved (source included). ~/.pi is allowed from any project. Any other file write, and any non-read-only shell command, requires explicit user approval per call. If the user denies, ask for direction — do not retry or work around the gate.
+- Writes are pre-approved only inside docs/ in this project, ~/.pi/setup/, and temp dirs (/tmp, the OS temp dir). Source and config edits are hard-blocked here: delegate them to the worker subagent. Every other file write, and every non-read-only shell command, requires explicit user approval per call. If the user denies, ask for direction — do not retry or work around the gate.
 - Do not edit source code in this session. Delegate implementation to subagents (worker, tester, reviewer, documenter). Every subagent launch requires explicit user confirmation.
 - Never attempt to evade the permission system (shell redirection, encoding tricks, alternative tools). Hard-blocked commands need the user's one-time passcode from /i-understand-the-danger.
 - Before executing an approved plan, restate the goal and step list in chat.`;
@@ -74,6 +97,49 @@ function loadGlobalRules(): AllowRules {
 
 function loadProjectRules(cwd: string): AllowRules {
 	return loadRules(projectRulesPath(cwd));
+}
+
+/** The pi config root (~/.pi), i.e. the agent dir's parent. */
+function piRootPath(): string {
+	return path.resolve(getAgentDir(), "..");
+}
+
+/**
+ * Pi's own installation roots: walk up from the running script to the
+ * `pi-coding-agent` package directory and include it plus its parent. Returns
+ * an empty list when the layout is not recognisable (the `read` allowlist is
+ * the escape hatch for unusual installs).
+ */
+function piInstallRoots(): string[] {
+	const script = process.argv[1];
+	if (!script) return [];
+	let start: string;
+	try {
+		start = fs.realpathSync(script);
+	} catch {
+		return [];
+	}
+	let current = path.dirname(start);
+	while (true) {
+		if (path.basename(current) === "pi-coding-agent") return [current, path.dirname(current)];
+		const parent = path.dirname(current);
+		if (parent === current) return [];
+		current = parent;
+	}
+}
+
+/**
+ * Roots read-only bash may `cd` into: the project, ~/.pi, the pi install,
+ * temp dirs, and configured `read` rules. They extend `cd` trust only; they do
+ * not authorize a command on their own.
+ */
+function readRoots(cwd: string): string[] {
+	const project = loadProjectRules(cwd);
+	const global = loadGlobalRules();
+	const configured = [...project.read, ...global.read].map((rule) =>
+		resolveFromCwd(expandHome(rule), cwd),
+	);
+	return uniqueResolved([cwd, piRootPath(), ...piInstallRoots(), "/tmp", os.tmpdir(), ...configured]);
 }
 
 function pathFromInput(input: Record<string, unknown>): string | null {
@@ -109,6 +175,14 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 	let titleInstalled = false;
 	let userRailEnabled = true;
 
+	// One tracker per process: the footer shows the live sample while a reply
+	// streams and the last completed call's numbers when idle.
+	const throughput = createThroughputTracker();
+	let footerHandle: FooterHandle | undefined;
+	let lastRenderAt = 0;
+	let streamedChars = 0;
+	let seenTextLength = 0;
+
 	installBlockRenderers(pi);
 	installUserMessageRail(pi, () => userRailEnabled);
 
@@ -134,12 +208,27 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 	function setupFooter(ctx: ExtensionContext): void {
 		if (ctx.mode !== "tui") return;
 		if (footerEnabled && !footerInstalled) {
-			installGovernanceFooter(ctx, () => ({ planMode, passcodeActive: passcodeActive() }));
+			footerHandle = installGovernanceFooter(ctx, () => ({
+				planMode,
+				passcodeActive: passcodeActive(),
+				throughput: () => throughput.snapshot(),
+			}));
 			footerInstalled = true;
 		} else if (!footerEnabled && footerInstalled) {
 			ctx.ui.setFooter(undefined);
 			footerInstalled = false;
+			footerHandle = undefined;
 		}
+	}
+
+	/** Repaint the footer at most ~10 Hz; `force` settles the final numbers. */
+	function requestFooterRender(force = false): void {
+		const handle = footerHandle;
+		if (!handle) return;
+		const now = performance.now();
+		if (!force && now - lastRenderAt < RENDER_INTERVAL_MS) return;
+		lastRenderAt = now;
+		handle.requestRender();
 	}
 
 	function setupTitleBar(ctx: ExtensionContext): void {
@@ -438,11 +527,24 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 		if (tool === "edit" || tool === "write") {
 			const p = pathFromInput(input);
 			if (!p) return { block: true, reason: "Blocked: write call without a target path." };
-			const abs = resolveFromCwd(p, cwd);
+			// Expand `~` first, then resolve against the session cwd.
+			const abs = resolveWritePath(p, cwd);
 
-			// D-0009: the whole current project is trusted for writes. Source edits
-			// stay delegated by workflow convention, not by the gate.
-			if (isInside(cwd, abs)) return undefined;
+			// D-0011: docs, pi setup, and temp dirs are free; source/config edits
+			// inside the project or ~/.pi are delegated to a worker subagent.
+			const verdict = mainWriteVerdict(abs, { projectRoot: cwd, piRoot: piRootPath() });
+			if (verdict === "allow") return undefined;
+			if (verdict === "block-source") {
+				return {
+					block: true,
+					reason: [
+						"⛔ BLOCKED · source/config write",
+						`Path: ${displayPath(abs, cwd)}`,
+						"The main session may only write docs/, ~/.pi/setup/, and temp dirs.",
+						"Source and config edits are delegated: launch the `worker` subagent to make this change.",
+					].join("\n"),
+				};
+			}
 
 			const project = loadProjectRules(cwd);
 			const global = loadGlobalRules();
@@ -459,7 +561,7 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 			const command = typeof input.command === "string" ? input.command : "";
 			if (!command.trim()) return { block: true, reason: "Blocked: empty bash command." };
 
-			const reason = dangerousReason(command, cwd, [path.resolve(getAgentDir(), "..")]);
+			const reason = dangerousReason(command, cwd, [piRootPath()]);
 			if (reason) return handleHardBlock(ctx, command, reason);
 
 			let cwdNote: string | undefined;
@@ -468,11 +570,8 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 				if (!isInside(cwd, requested)) cwdNote = `requested cwd: ${requested}`;
 			}
 
-			if (!cwdNote && isSafeBashCommand(command, cwd)) return undefined;
-
-			// Commands whose absolute paths all live inside the pi config root are
-			// trusted, matching the global write allowlist for ~/.pi.
-			if (!cwdNote && bashPathsAllInsideRoots(command, [path.resolve(getAgentDir(), "..")])) return undefined;
+			const roots = readRoots(cwd);
+			if (!cwdNote && isSafeBashCommand(command, cwd, roots, freeWriteRoots(cwd, piRootPath()))) return undefined;
 
 			const project = loadProjectRules(cwd);
 			const global = loadGlobalRules();
@@ -488,6 +587,28 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 			return askBashPermission(ctx, command, cwd);
 		}
 
+		if (tool === "powershell") {
+			return {
+				block: true,
+				reason: [
+					"⛔ BLOCKED · powershell is not supported",
+					"This setup only supports the `bash` tool. Run the equivalent command with `bash` instead.",
+				].join("\n"),
+			};
+		}
+
+		// Fail closed: a tool the gate does not understand never runs unattended.
+		if (!MAIN_ALLOWED_TOOLS.has(tool)) {
+			return {
+				block: true,
+				reason: [
+					`⛔ BLOCKED · unknown tool (${tool})`,
+					"The governance gate has no policy for this tool, so it cannot be allowed.",
+					"Add it to MAIN_ALLOWED_TOOLS in the governance extension if it is read-only.",
+				].join("\n"),
+			};
+		}
+
 		return undefined;
 	}
 
@@ -500,6 +621,9 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 		input: Record<string, unknown>,
 	): { block: true; reason: string } | undefined {
 		const cwd = process.env.PI_SUBAGENT_ROOT ?? process.cwd();
+		// Honor launch-time allowPaths as well as the working directory.
+		const configuredRoots = subagentRoots();
+		const approvedRoots = uniqueResolved(configuredRoots.length > 0 ? configuredRoots : [cwd]);
 		const scopeNote =
 			"Subagents are scoped to the project directory. The parent session must ask the user and re-launch with allowPaths for outside access.";
 
@@ -510,7 +634,7 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 		if (tool === "edit" || tool === "write") {
 			const p = pathFromInput(input);
 			if (!p) return { block: true, reason: `Blocked: write call without a target path. ${scopeNote}` };
-			const abs = resolveFromCwd(p, cwd);
+			const abs = resolveWritePath(p, cwd);
 			if (isOutsideSubagentScope(abs)) {
 				return { block: true, reason: `Blocked: ${displayPath(abs, cwd)} is outside the approved scope. ${scopeNote}` };
 			}
@@ -528,7 +652,7 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 					reason: `HARD BLOCK (${danger}): ${command}\nDangerous commands cannot be authorized from a subagent. Report back and let the user run it.`,
 				};
 			}
-			const escape = bashScopeEscape(command, cwd);
+			const escape = bashScopeEscape(command, [cwd, ...approvedRoots]);
 			if (escape) return { block: true, reason: `Blocked: ${escape}. ${scopeNote}` };
 			return undefined;
 		}
@@ -542,6 +666,22 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 					reason: `Blocked: ${displayPath(target, cwd)} is outside the approved scope (even reads need a grant). ${scopeNote}`,
 				};
 			}
+			return undefined;
+		}
+
+		if (tool === "powershell") {
+			return {
+				block: true,
+				reason: `Blocked: powershell is not supported. Only the bash tool is available in this setup. ${scopeNote}`,
+			};
+		}
+
+		// Fail closed: a tool without a subagent policy never runs unattended.
+		if (!SUBAGENT_ALLOWED_TOOLS.has(tool)) {
+			return {
+				block: true,
+				reason: `Blocked: tool "${tool}" has no subagent policy, so it fails closed. ${scopeNote}`,
+			};
 		}
 
 		return undefined;
@@ -553,6 +693,60 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 			return handleSubagentCall(event.toolName, input);
 		}
 		return handleMainCall(event.toolName, input, ctx);
+	});
+
+	// -----------------------------------------------------------------------
+	// Live throughput (footer segment)
+	// -----------------------------------------------------------------------
+
+	/** Length of the cumulative text so far; deltas are derived from its growth. */
+	function assistantTextLength(message: AssistantMessage): number {
+		const content = message.content;
+		if (!Array.isArray(content)) return 0;
+		let length = 0;
+		for (const block of content) {
+			if (block.type === "text" && typeof block.text === "string") length += block.text.length;
+		}
+		return length;
+	}
+
+	pi.on("message_start", (event) => {
+		const message = event.message as AssistantMessage | undefined;
+		if (!message || message.role !== "assistant") return;
+		throughput.start();
+		streamedChars = 0;
+		seenTextLength = 0;
+	});
+
+	pi.on("message_update", (event, ctx) => {
+		const message = event.message as AssistantMessage | undefined;
+		if (!message || message.role !== "assistant") return;
+
+		const reported = message.usage?.output ?? 0;
+		let output = reported;
+		if (!(output > 0)) {
+			// Fallback for providers that only send usage in the final chunk: count
+			// the growth of the cumulative text and estimate tokens from it.
+			const length = assistantTextLength(message);
+			if (length > seenTextLength) {
+				streamedChars += length - seenTextLength;
+				seenTextLength = length;
+			}
+			output = streamedChars / CHARS_PER_TOKEN;
+		}
+
+		const sample = throughput.update({ output }, !(reported > 0));
+		if (!sample) return;
+		if (ctx.mode !== "tui" || !footerInstalled) return;
+		requestFooterRender();
+	});
+
+	pi.on("message_end", (event, ctx) => {
+		const message = event.message as AssistantMessage | undefined;
+		if (!message || message.role !== "assistant") return;
+		throughput.end(message);
+		if (ctx.mode !== "tui" || !footerInstalled) return;
+		requestFooterRender(true);
 	});
 
 	// -----------------------------------------------------------------------
@@ -591,12 +785,14 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 					`${label} (${displayPath(file, ctx.cwd)}):`,
 					`  write: ${rules.write.length > 0 ? rules.write.join(", ") : "(none)"}`,
 					`  bash:  ${rules.bash.length > 0 ? rules.bash.join(", ") : "(none)"}`,
+					`  read:  ${rules.read.length > 0 ? rules.read.join(", ") : "(none)"}`,
 				].join("\n");
 			ctx.ui.notify(
 				[
 					render("Project", project, projectRulesPath(ctx.cwd)),
 					render("Global", global, globalRulesPath()),
-					`Read-only tools, the current project tree, and ~/.pi are always allowed.`,
+					`Main-session writes: docs/ + ~/.pi/setup/ + temp dirs. Source/config writes are delegated to a worker subagent.`,
+					`Read-only bash may cd into: the project, ~/.pi, the pi install, temp dirs, and read rules.`,
 				].join("\n\n"),
 				"info",
 			);
@@ -646,6 +842,11 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 		setupFooter(ctx);
 		setupTitleBar(ctx);
 		setupThinking(ctx);
+		// Subagents are implementation processes, not planning sessions: never
+		// inject the main-session plan-first text into them. (The `plan` flag's
+		// negation is not accepted by the CLI in pi 1.2.0, so `--no-plan` cannot
+		// be used at spawn time.)
+		if (process.env.PI_GOVERNED_SUBAGENT === "1") return undefined;
 		if (!planMode || event.messageType !== "user") return undefined;
 		return {
 			message: {
@@ -685,6 +886,9 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 			}
 		}
 		if (pi.getFlag("plan") === false) planMode = false;
+		// Subagents are implementation processes: they never start in plan mode,
+		// so the badge and working indicator must not claim it.
+		if (process.env.PI_GOVERNED_SUBAGENT === "1") planMode = false;
 		updateStatus(ctx);
 		setupFooter(ctx);
 		setupTitleBar(ctx);

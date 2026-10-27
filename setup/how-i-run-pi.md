@@ -52,12 +52,13 @@ Implemented with the `tool_call` hook: every tool call is classified before it r
 ### Main session — auto-allowed
 
 - `read`, `grep`, `find`, `ls` — anywhere.
-- Read-only bash, when **every** segment matches an allowlist: `cat head tail grep rg find fd ls pwd echo printf wc sort uniq diff file stat du df tree which env uname whoami id date ps jq`, `git status/log/diff/show/branch/remote/config --get/ls-files/...`, `npm list/view/audit`, `--version` probes, etc.
-- `cd` into the project directory (bare `cd`/`cd ..`/outside still prompts).
-- Harmless redirects: `2>&1`, `>/dev/null`.
-- Writes anywhere inside the current project tree (source included).
-- Writes anywhere under `~/.pi` from any project, via the global allowlist.
+- **Writes only** in `<project>/docs/`, `~/.pi/setup/`, `/tmp`, and the OS temp dir. Writes anywhere else inside the project, and anywhere inside `~/.pi` outside `setup/`, are **hard-blocked** with a "delegate to `worker`" message (no passcode path).
+- Read-only bash from a minimal safe list: `cat head tail grep ls eza pwd wc diff stat du df tree which whereis type printenv uname whoami id date ps jq`, `rg` (no `--pre`), `find`/`fd` (no `-exec/-delete/-fprint`), `git status|log|diff|show|branch --show-current|remote -v|config --get|ls-files|rev-parse|describe|blame|shortlog|stash list`, `npm list|view|info|search|outdated|audit`, `node|python3 --version`.
+- `cd` into the project, `~/.pi`, the pi installation directory, `/tmp`, the OS temp dir, and configured `read` roots.
+- Redirections whose target is a free-write root, `mkdir` into a free-write root, and non-recursive `rm` inside `/tmp` or the OS temp dir.
 - The `questionnaire` tool.
+
+`sed`, `awk`, `sort`, `uniq`, `curl`, `wget`, `less`, `file`, `echo`, and `printf` are **not** auto-allowed: each can write a file or execute code with a single flag or positional argument. They prompt; allowlist the specific form you trust.
 
 ### Main session — prompts
 
@@ -71,15 +72,16 @@ Format:
 ```json
 {
   "write": ["src/generated/", "/home/me/shared/notes/"],
-  "bash": ["npm test", "git status *"]
+  "bash": ["npm test", "git status *"],
+  "read": ["~/other-repo/"]
 }
 ```
 
-Write rules are exact files or directories ending in `/`; relative paths resolve from the project root. Bash rules are exact commands or prefix rules ending in ` *`. Compound commands (`&&`, `;`, `|`) can only be remembered exactly, so an approval can't bless whatever is appended.
+Write rules are exact files or directories ending in `/`; relative paths resolve from the project root. `read` rules only extend bash `cd` trust (they never grant writes). Bash rules are exact commands or prefix rules ending in ` *`. Compound commands (`&&`, `;`, `|`) can only be remembered exactly, so an approval can't bless whatever is appended.
 
 ### Hard blocks
 
-Never auto-approved, regardless of allowlists: `sudo`, shutdown/reboot, disk formatting, `dd if=`, pipe-to-shell, force push, `git reset --hard`, `git clean -fd`, package publish, fork bombs, `chmod 777 /`, and `rm -rf` targeting anything outside the project.
+Never auto-approved, regardless of allowlists: `sudo`, shutdown/reboot, disk formatting, `dd if=`, pipe-to-shell, force push, `git reset --hard`, `git clean -fd`, package publish, fork bombs, `chmod 777 /`, and `rm -rf` targeting anything outside the project. Quoted forms are normalised first, so `git push "--force"` is still caught.
 
 To allow one run, the user runs `/i-understand-the-danger`; it prints a one-time passcode (2 minutes, single use) that must be typed into the confirmation dialog. The model never sees the passcode.
 
@@ -95,10 +97,14 @@ PI_SUBAGENT_ALLOW_PATHS=["/explicit/extra/paths"]
 
 The same extension runs inside the child and:
 
-- allows reads/writes only inside that scope,
+- allows reads/writes only inside that scope (`PI_SUBAGENT_ROOT` + `allowPaths`),
 - blocks everything outside — **including reads** — and reports back,
+- applies a persistent `bash` scope check: absolute paths, quoted paths, `cd` (including `cd --`), relative `../` paths, `--opt=value`, attached short-flag values, interpreters, and shell `-c` payloads are audited; unanalysable quoting fails closed,
 - blocks dangerous commands outright (no UI to authorize them),
-- cannot launch nested subagents.
+- cannot launch nested subagents,
+- does **not** get the main-session plan-first text injected and runs with plan mode off, so a worker edits rather than delegates.
+
+Bash scoping is best-effort, not a security boundary: stdin payloads into an interpreter (`… | bash`), unlisted executors, and absolute paths embedded inside a payload string are not audited. The precise gates are the `read`/`write`/`edit` tools. A determined command can still reach outside the scope; keep subagent launches explicit because every launch is a user-approved, project-scoped process.
 
 If a task genuinely needs an outside path, the child reports it; the main session asks the user and re-launches with `allowPaths`, which is shown in the confirmation.
 

@@ -4,12 +4,22 @@
 
 import * as path from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { formatRate, formatTtft, type ThroughputSnapshot } from "./throughput.ts";
 
-export interface FooterState {
+export interface TitleState {
 	planMode: boolean;
 	passcodeActive: boolean;
+}
+
+export interface FooterState extends TitleState {
+	throughput: () => ThroughputSnapshot;
+}
+
+/** Lets the extension repaint the footer without owning a timer. */
+export interface FooterHandle {
+	requestRender(): void;
 }
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -18,6 +28,20 @@ function formatTokens(count: number): string {
 	if (count < 1000) return `${count}`;
 	if (count < 1_000_000) return `${(count / 1000).toFixed(1)}k`;
 	return `${(count / 1_000_000).toFixed(1)}M`;
+}
+
+/**
+ * `⚡142 tok/s · 0.9s ttft` — accent while a reply streams, muted for the last
+ * completed call, `~` when the rate came from a character estimate. Hidden
+ * before the first measured call and without the ttft part when it is unknown.
+ */
+function throughputSegment(snapshot: ThroughputSnapshot, theme: Theme): string | null {
+	const sample = snapshot.sample;
+	if (!sample || !Number.isFinite(sample.tokensPerSecond) || sample.tokensPerSecond <= 0) return null;
+	const rate = `${sample.estimated ? "~" : ""}${formatRate(sample.tokensPerSecond)} tok/s`;
+	const parts = [`⚡${rate}`];
+	if (sample.ttftMs != null) parts.push(`${formatTtft(sample.ttftMs)} ttft`);
+	return theme.fg(snapshot.live ? "accent" : "muted", parts.join(" · "));
 }
 
 /** Color the streaming spinner to match the current mode. TUI only. */
@@ -34,7 +58,7 @@ export function applyWorkingIndicator(ctx: ExtensionContext, planMode: boolean):
  * Persistent title bar above the editor: project + mode + model.
  * A widget instead of a header, because pi's header scrolls with the transcript.
  */
-export function installGovernanceTitleBar(ctx: ExtensionContext, getState: () => FooterState): void {
+export function installGovernanceTitleBar(ctx: ExtensionContext, getState: () => TitleState): void {
 	if (ctx.mode !== "tui") return;
 	ctx.ui.setWidget(
 		"governance-title",
@@ -57,16 +81,23 @@ export function installGovernanceTitleBar(ctx: ExtensionContext, getState: () =>
 }
 
 /**
- * One-line footer: mode badge, context usage, session totals on the left;
- * git branch and model on the right. TUI only.
+ * One-line footer: mode badge, context usage, session totals and live
+ * throughput on the left; git branch and model on the right. TUI only.
  */
-export function installGovernanceFooter(ctx: ExtensionContext, getState: () => FooterState): void {
-	if (ctx.mode !== "tui") return;
+export function installGovernanceFooter(
+	ctx: ExtensionContext,
+	getState: () => FooterState,
+): FooterHandle {
+	const mounted: { tui: TUI | undefined } = { tui: undefined };
+	if (ctx.mode !== "tui") return { requestRender: () => {} };
 	ctx.ui.setFooter((tui, theme, footerData) => {
+		mounted.tui = tui;
 		const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
 		return {
-			dispose: unsubscribe,
-			invalidate() {},
+			dispose() {
+				mounted.tui = undefined;
+				unsubscribe();
+			},
 			render(width: number): string[] {
 				const state = getState();
 
@@ -88,11 +119,14 @@ export function installGovernanceFooter(ctx: ExtensionContext, getState: () => F
 				const titleStyled =
 					theme.fg("accent", title) + (state.passcodeActive ? ` ${theme.fg("warning", "🔑")}` : "");
 				const separator = theme.fg("borderMuted", "  ·  ");
-				const left = `  ${[
+				const leftParts = [
 					titleStyled,
 					theme.fg("muted", ctxLabel),
 					theme.fg("muted", `↑${formatTokens(input)}  ↓${formatTokens(output)}`),
-				].join(separator)}`;
+				];
+				const tps = throughputSegment(state.throughput(), theme);
+				if (tps) leftParts.push(tps);
+				const left = `  ${leftParts.join(separator)}`;
 				const branch = footerData.getGitBranch();
 				const rightParts = branch ? [`⎇ ${branch}`, `$${cost.toFixed(3)}`] : [`$${cost.toFixed(3)}`];
 				const right = `${theme.fg("muted", rightParts.join(separator))}  `;
@@ -105,4 +139,5 @@ export function installGovernanceFooter(ctx: ExtensionContext, getState: () => F
 			},
 		};
 	});
+	return { requestRender: () => mounted.tui?.requestRender() };
 }

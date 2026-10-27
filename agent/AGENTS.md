@@ -12,8 +12,8 @@ This file applies to every project. Project-level `AGENTS.md` files override it 
 
 Every session starts in **plan mode**. The `governance` extension enforces this:
 
-- Read-only tools (`read`, `grep`, `find`, `ls`) and allowlisted read-only shell commands run without asking.
-- Writes anywhere inside the current project are pre-approved (source included). `~/.pi/` is writable from any project via the global allowlist.
+- Read-only tools (`read`, `grep`, `find`, `ls`) and allowlisted read-only shell commands run without asking. Read-only bash may `cd` into the project, `~/.pi`, the pi installation directory, `/tmp`, the OS temp dir, and any configured `read` roots.
+- Writes are free only inside `docs/` of the current project, `~/.pi/setup/`, `/tmp`, and the OS temp dir. Source and config edits inside the project and inside `~/.pi` outside `setup/` are hard-blocked for the main session: delegate them to the `worker` subagent (no passcode path).
 - Every other write/edit and every non-read-only shell command requires an explicit user approval per call. If the user allows it "always", it is added to an allowlist (`<project>/.pi/permissions.local.json` or `~/.pi/agent/permissions.json`).
 - A never-allow list (sudo, force push, hard reset, publish, `rm -rf` outside the project, pipe-to-shell, …) is hard-blocked. Only the user can authorize one of these, once, with the passcode from `/i-understand-the-danger`.
 - Subagents run in separate processes scoped to the project directory. They cannot prompt, so out-of-scope actions fail closed. Outside access requires the main session to ask the user and re-launch with `allowPaths`.
@@ -51,6 +51,10 @@ The main session does not edit source code. Implementation happens through subag
 | `documenter` | docs/ write | Plans, decision records, notes (never source) |
 
 Suggested flow: scout → plan (write the plan file, get approval) → worker implements → tester verifies → reviewer reviews → worker fixes review findings → documenter records outcomes. Skip steps that add no value, but never skip verification.
+
+### Subagent sessions
+
+The docs-only write rule above applies to the **main session**. Worker, tester, and reviewer processes edit source code inside the directory scope they were launched with (`PI_SUBAGENT_ROOT` plus any `allowPaths`); `documenter` stays on docs. The precise gates are the `read`/`write`/`edit` tools; bash scoping is best-effort, so a determined command can still reach outside the approved scope. Subagents cannot prompt, so an out-of-scope action fails closed and must go back to the parent session.
 
 ## Model choice
 
