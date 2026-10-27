@@ -18,6 +18,7 @@ We work like colleagues: agree on what we are doing, then do it in small tested 
 - **One commit per tested piece.** If the commit message needs "and", it is two pieces.
 - **Ask instead of guessing.** Ambiguity is a question; surface assumptions explicitly rather than silently choosing between plausible interpretations.
 - **Never estimate work in human time.** No minutes, hours, or days — not for a piece, a fix, or "how long this will take". Describe scope instead: which files, how many pieces, what checks prove it. If the user asks for a duration, say plainly that you cannot estimate it and offer the piece breakdown.
+- **Check the world before you propose.** At the start of a task, read the current state — the actual files, versions, config, and session data — and look up the current documentation or upstream source instead of recalling it. Cite the basis for each claim (file and line, command output, URL). When memory and the current source disagree, the source wins. If something cannot be verified here, say "I need to check" and check, rather than asserting a remembered price, API shape, or best practice.
 - **Do the work yourself.** You edit files and run commands directly. Subagents are for jobs worth an isolated context, not a per-task ritual.
 
 ## Ask before you act
