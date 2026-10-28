@@ -33,9 +33,10 @@ We work like colleagues: agree on what we are doing, then do it in small tested 
 
 The `governance` extension prompts only where the answer carries information:
 
-- **Free:** reads; writes/edits anywhere inside the project or `~/.pi`; read-only bash; bash that provably stays inside those roots (tests, `git`, package scripts, `mv`, `mkdir`, ordinary redirects).
-- **Prompts:** writes and commands reaching outside the project and `~/.pi`, and network commands (`curl`, `ssh`, …). Approval can be remembered in the project allowlist (`<project>/.pi/permissions.local.json`) or the global one (`~/.pi/agent/permissions.json`).
+- **Free (allow-by-default):** reads; writes/edits inside the project, `~/.pi`, or the temp dirs (`/tmp`, `os.tmpdir()`); and essentially **any local bash command** — tests, package scripts, `git`, `mv`, `mkdir`, `python3 -c`, `node -e`, heredocs, `$(…)`, redirections into the project or temp dirs.
+- **Prompts:** **installing software** (`npm/pnpm/yarn install|add`, `pip install`, `uv add`, `cargo install`, `go get`, `brew install`, `apt/dnf/pacman/conda install`); **publishing to a remote** (`git push`, `git clone`); network commands (`curl`, `ssh`, `scp`, …); **writes outside the project, `~/.pi`, and the temp dirs**; and destructive local forms (`find -delete`/`-exec`, `rm -r`). Installs and boundary writes are allowlistable in the project allowlist (`<project>/.pi/permissions.local.json`) or the global one (`~/.pi/agent/permissions.json`).
 - **Always prompts, never allowlistable:** irreversible operations — `sudo`, force push, `git reset --hard`, `git clean -fd`, `git restore`, `git branch -D`, history rewrites, package publish, pipe-to-shell, disk writes, shutdown/reboot, and `rm -rf` anywhere (inside the project included). Only the user can authorize one run, with the one-time passcode from `/i-understand-the-danger`.
+- **Scratch code:** the temp dirs (`/tmp`, `os.tmpdir()`) are for genuinely throwaway work — one-off checks, quick experiments. Durable, reviewable, or reusable code belongs in the project (commit it). `python3 -c` and heredocs are allowed; when an analysis turns out to recur, promote it into a script.
 - Never try to evade the gate (shell redirection, encoding tricks, alternate tools). `/permissions` shows the allowlists.
 
 ## Subagents

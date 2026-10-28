@@ -23,7 +23,10 @@ import {
 } from "./utils.ts";
 
 // Temp project root: the suite must not depend on a path from this machine.
-const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "govtest-"));
+// It must live OUTSIDE /tmp and os.tmpdir(): on Linux os.tmpdir() is /tmp, so
+// a project root under os.tmpdir() would make every project-relative write
+// (and rm/mkdir/redirect) resolve inside a free root and flip the matrix.
+const ROOT = fs.mkdtempSync(path.join(process.env.HOME ?? os.homedir(), "govtest-"));
 process.on("exit", () => {
 	try {
 		fs.rmSync(ROOT, { recursive: true, force: true });
@@ -202,8 +205,17 @@ const quotingCases: Array<[string, boolean]> = [
 	["cat \\/etc/passwd", false],
 	["sed -n $'1w out' file", false],
 	['cat $"hi"', false],
-	['grep -n "a\\|b" f', false],
+	// D-0032: harmless backslashes inside double quotes are analysable now, so
+	// ordinary grep alternation patterns stop prompting. Only the backslashes
+	// that can move a quote/word boundary still reject.
+	['grep -n "a\\|b" f', true],
 	["grep -n 'a\\|b' f", true],
+	['grep -n "LIST_SLOTS\\s*=" f', true],
+	['grep -n "exact@all\\|answered\\b" f', true],
+	['grep -n "a\\"b" f', false],
+	['grep -n "a\\\\b" f', false],
+	['grep -n "trailing\\" f', false],
+	['grep -n "a\\\nb" f', false],
 	["cat $(rm x)", false],
 	["cat ${HOME}", false],
 	["cat `rm x`", false],
@@ -299,10 +311,9 @@ function piInstallRoot(): string | null {
 const PI_INSTALL = piInstallRoot();
 const READ_ROOTS = [ROOT, HOME_PI, "/tmp", os.tmpdir(), ...(PI_INSTALL ? [PI_INSTALL] : [])];
 
-// Free-write roots for the classification matrix. ROOT itself lives under
-// os.tmpdir(), so trusting os.tmpdir() here would make every project-relative
-// write look free; docs/, the pi setup dir, and the literal /tmp are the roots
-// these cases exercise.
+// Free-write roots for the classification matrix: the project's docs/, the pi
+// setup dir, and the literal /tmp. ROOT lives outside the temp dirs (see its
+// declaration), so project-relative writes never resolve inside a free root.
 const FREE_ROOTS = [path.join(ROOT, "docs"), path.join(HOME_PI, "setup"), "/tmp"];
 
 const cdCases: Array<[string, boolean]> = [
@@ -501,11 +512,12 @@ const writeVerdictCases: Array<[string, "allow" | "ask"]> = [
 	[path.join(HOME_PI, "setup", "x.md"), "allow"],
 	[path.join(HOME_PI, "agent", "x.ts"), "allow"],
 	[path.join(HOME_PI, "agent", "extensions", "governance", "index.ts"), "allow"],
+	// Temp dirs are free-write roots (D-0031): scratch for exploration code.
+	["/tmp/x", "allow"],
+	[path.join(os.tmpdir(), "x"), "allow"],
 	// Anything else prompts.
 	[path.join(os.homedir(), "Downloads", "x"), "ask"],
 	[path.join(os.homedir(), "other", "x"), "ask"],
-	["/tmp/x", "ask"],
-	[path.join(os.tmpdir(), "x"), "ask"],
 ];
 
 runCases(writeVerdictCases, "mainWriteVerdict", (target) => mainWriteVerdict(target, writeScope));
@@ -552,6 +564,19 @@ try {
 		mainWriteVerdict(path.join(plainPiRoot, "setup", "x.md"), { projectRoot: symlinkProject, piRoot: plainPiRoot }),
 		"allow",
 		"real setup/ stays free",
+	);
+
+	// A symlink inside a free temp dir that points elsewhere still asks (D-0031).
+	const tmpLink = path.join(symlinkBase, "tmplink");
+	fs.mkdirSync(tmpLink, { recursive: true });
+	fs.symlinkSync(os.homedir(), path.join(tmpLink, "out"), "dir");
+	check(
+		mainWriteVerdict(path.join(tmpLink, "out", "escaped.md"), {
+			projectRoot: symlinkProject,
+			piRoot: HOME_PI,
+		}),
+		"ask",
+		"a write through a symlink inside /tmp that points outside still asks",
 	);
 } finally {
 	fs.rmSync(symlinkBase, { recursive: true, force: true });
@@ -787,6 +812,13 @@ function gate(command: string, scope: BashScope): "hard-block" | "allow" | "ask"
 }
 
 const bashScope: BashScope = { projectRoot: PROJECT, piRoot: HOME_PI };
+// The same scope with the temp dirs trusted, as `index.ts` builds it, so the
+// allow-by-default cases can exercise `> /tmp/x` and `/tmp` script paths.
+const bashScopeWithTemp: BashScope = {
+	projectRoot: PROJECT,
+	piRoot: HOME_PI,
+	readRoots: [PROJECT, HOME_PI, "/tmp", os.tmpdir()],
+};
 const bashVerdictCases: Array<[string, "hard-block" | "allow" | "ask"]> = [
 	// Ordinary work inside the project or ~/.pi runs without asking.
 	["git commit -m x", "allow"],
@@ -802,14 +834,48 @@ const bashVerdictCases: Array<[string, "hard-block" | "allow" | "ask"]> = [
 	// Recursive removal is never auto-allowed: -r asks, -rf is hard-blocked.
 	["rm -r src", "ask"],
 	["rm -R src", "ask"],
-	// Outside the two roots, and network tools, ask.
-	["cd ~/other", "ask"],
-	["cat /etc/hosts", "ask"],
-	["ls /etc", "ask"],
+	// D-0032: provably read-only commands are allowed anywhere, matching the
+	// read/grep/ls tools, which were already free outside the project.
+	["cat /etc/hosts", "allow"],
+	["ls /etc", "allow"],
+	["cd ~/other", "allow"],
+	["cd /etc && ls", "allow"],
+	['grep -rn "root" /etc/hostname', "allow"],
+	["cat /etc/hostname > out.txt", "allow"],
+	["cat /etc/hostname > ~/.bashrc", "ask"],
+	["cp /etc/hosts ~/x", "ask"],
+	["cp /etc/hosts ./x", "allow"],
+	["dd if=/dev/zero of=~/x", "hard-block"],
+	["dd if=/dev/zero of=./x", "hard-block"],
+	["ls /etc && mkdir -p /etc/x", "ask"],
+	// Commands that are not provably read-only keep the old scope check.
 	["git -C /other status", "ask"],
 	["curl https://example.com", "ask"],
 	["wget https://example.com/x", "ask"],
 	["ssh host uptime", "ask"],
+	// D-0032: installing software or publishing asks, even inside the project.
+	["npm install", "ask"],
+	["npm ci", "ask"],
+	["npm i left-pad", "ask"],
+	["pnpm add zod", "ask"],
+	["pip install numpy", "ask"],
+	["pip3 install -e .", "ask"],
+	["uv add pandas", "ask"],
+	["poetry add requests", "ask"],
+	["cargo install ripgrep", "ask"],
+	["go get github.com/x/y", "ask"],
+	["gem install rails", "ask"],
+	["brew install jq", "ask"],
+	["apt install jq", "ask"],
+	["apt-get install -y jq", "ask"],
+	["pacman -S jq", "ask"],
+	["git push origin main", "ask"],
+	["git clone https://x/y", "ask"],
+	// ...but the ordinary read-only forms around them stay prompt-free.
+	["npm test", "allow"],
+	["npm ls", "allow"],
+	["git status", "allow"],
+	["git log --oneline", "allow"],
 	// Irreversible operations stay hard-blocked even when scoped.
 	["rm -rf node_modules", "hard-block"],
 	["git restore .", "hard-block"],
@@ -821,6 +887,54 @@ const bashVerdictCases: Array<[string, "hard-block" | "allow" | "ask"]> = [
 
 for (const [command, expected] of bashVerdictCases) {
 	check(gate(command, bashScope), expected, `gate(${JSON.stringify(command)})`);
+}
+
+// D-0033: the gate is allow-by-default. Only installs/publishes, network,
+// writes outside the trusted roots, and destructive forms ask.
+const allowByDefaultCases: Array<[string, "hard-block" | "allow" | "ask"]> = [
+	// Local code execution is ordinary work — it was already reachable by
+	// writing a script into the project and running it.
+	["python3 -c 'print(1)'", "allow"],
+	["node -e 'x'", "allow"],
+	["bash -c 'x'", "allow"],
+	["uv run python -c 'import x'", "allow"],
+	["echo $(git rev-parse HEAD)", "allow"],
+	["awk '{print $2}' reports/x.json", "allow"],
+	["for d in runs/*; do echo $d; done", "allow"],
+	["echo hi > /tmp/x", "allow"],
+	["cat /etc/shadow", "allow"],
+	["grep -r KEY /", "allow"],
+	["cd /etc && ls", "allow"],
+	// Heredoc bodies are data: a payload containing `>` or an arrow is not a
+	// shell redirect, and must not make the command look like a write.
+	["python3 - <<'PY'\nfor r in rows if r[0]>20467:\n    pass\nPY", "allow"],
+	["git commit -F - <<'MSG'\nadd a -> b mapping\nMSG", "allow"],
+	// Writes outside the roots still ask, including through variables and flags.
+	["echo x > $HOME/.bashrc", "ask"],
+	["echo x > ${HOME}/.bashrc", "ask"],
+	["cp $HOME/.ssh/id_rsa ./x", "allow"],
+	["sed -i 's/a/b/' /etc/x", "ask"],
+	["sort -o /etc/x y", "ask"],
+	["sort -o/etc/x y", "ask"],
+	["sort --output=/etc/x y", "ask"],
+	["uniq a /etc/x", "ask"],
+	["tree -o /etc/x", "ask"],
+	["less -o /etc/x f", "ask"],
+	["git log --output=/etc/x", "ask"],
+	// The same forms inside the project are free.
+	["sed -i 's/a/b/' src/x.py", "allow"],
+	["sort -o ./out.txt y", "allow"],
+	["uniq a ./out.txt", "allow"],
+	["git log --output=./log.txt", "allow"],
+	// `find` delete/exec is destructive even inside the project.
+	["find . -delete", "ask"],
+	["find src -name '*.pyc' -delete", "ask"],
+	["find . -exec rm {} ;", "ask"],
+	["find src -name '*.py'", "allow"],
+];
+
+for (const [command, expected] of allowByDefaultCases) {
+	check(gate(command, bashScopeWithTemp), expected, `allowByDefault(${JSON.stringify(command)})`);
 }
 
 const home = process.env.HOME;

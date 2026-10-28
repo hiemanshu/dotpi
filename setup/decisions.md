@@ -407,3 +407,55 @@ The split uses an explicit per-frame `basis` (58% chat / 42% code) because pi-tu
 **Rationale:** The gate was built for a trust problem that no longer dominates, and plan mode's enforced write block was the part causing the friction; its injected rules duplicated `AGENTS.md`. Prompting on ordinary local work trains the user to approve reflexively, which is worse than not prompting. What remains is exactly the set where a human decision is valuable: crossing the project boundary and irreversible actions. Because the shell classifier is best-effort, the always-prompt list is now the whole safety net — too short is unrecoverable, so it errs long and `rm -rf` is never automatic.
 
 **Consequence:** a normal edit → test → commit slice produces zero prompts; a write outside the project/`~/.pi` prompts once and can be remembered; the title bar shows project and model only; `/plan` and the mode badge are gone. Plan files are now carried by the working agreement, not enforced by the gate.
+
+---
+
+## D-0031 — Temp dirs are free-write roots again; scratch vs durable code
+
+- **Date:** 2026-10-28
+- **Status:** accepted
+- **Supersedes:** the temp-dir exclusion introduced by D-0030 (D-0029 had `/tmp`/`os.tmpdir()` free; D-0030 dropped them)
+
+**Decision:** The main session's `write`/`edit` gate (`mainWriteVerdict`) allows `/tmp` and `os.tmpdir()` again, alongside the project and `~/.pi`. Symlinks are still resolved: a symlink inside a temp dir that points elsewhere resolves outside the root and asks. Guidance added to `AGENTS.md`: temp dirs are for genuinely throwaway/exploration scratch; durable code belongs in the project; quick JSON/CLI reads use `jq` or the read-only tools rather than `python3 -c`.
+
+**Alternatives:** keep `/tmp` writes prompting and require a project file or `jq` for every scratch read (the `python3 -c` prompt is by-design, but it fired on ordinary local exploration, which D-0030 says should be prompt-free); teach agents to route `-c` payloads through `/tmp` as a workaround (institutionalizes gate-evasion, and the script body stays invisible to the classifier wherever it lives).
+
+**Rationale:** Bash execution of `/tmp` scripts was already free (the path audits as inside the temp read roots), so only the `write` tool prompted — an inconsistency, not a protection. Re-freeing the temp dirs makes throwaway exploration prompt-free without touching the boundary or network prompts, and keeps the safety net where D-0030 put it (boundary crossing and irreversible operations). Symlink resolution means `/tmp` cannot be used to escape the root.
+
+**Consequence:** `write /tmp/x.py` is prompt-free again, matching `python3 /tmp/x.py` (already free). The classifier suite gained a symlink-in-/tmp regression case (425 → 426 cases). A pre-existing Linux-only harness bug — the test project root lived under `os.tmpdir()`, which collides with `/tmp` on Linux and flipped several classification cases — was fixed by moving that root outside the temp dirs.
+
+---
+
+## D-0032 — Read-only bash trusted anywhere; installs and pushes prompt
+
+- **Date:** 2026-10-28
+- **Status:** accepted
+- **Refines:** D-0030 (prompt only where the answer carries information), D-0031 (temp dirs free)
+
+**Decision:** Three changes to the main-session bash gate. (1) A command every segment of which is provably read-only — on the minimal safe list or a plain `cd`, no unsafe flag, no real redirect — is allowed **anywhere**, not just inside the trusted roots. This matches the `read`/`grep`/`ls` tools, which were always unscoped, so `cat /etc/hosts`, `grep -r x /`, and `cd /etc && ls` stop prompting. Writes remain scoped exactly as before. (2) Installing software and publishing to a remote now **prompt** even inside the project — package managers' `install`/`add`/`ci` and `git push`/`git clone` — because they are ordinary work, so they are allowlistable rather than hard-blocked; `sudo` in front is still hard-blocked. (3) Harmless backslashes inside double quotes are analysable: only `\"`, `\\`, a line continuation, and a trailing backslash reject, so ordinary `grep "a\|b"` patterns stop prompting.
+
+**Alternatives:** keep requiring every segment inside the trusted roots (the measured cost: 53 of 107 project-only commands in the clarke-flash sessions prompted, and an unreconciled split with the free `read` tool); keep `cat /etc/hosts` prompting and require a `read` allowlist entry per directory (config-only, but it never converges — every new directory costs a prompt); leave installs unprompted (the gate previously allowed `npm install`, `pip install`, `apt install`, and `git push origin main` silently, which contradicts the stated policy); tell agents to use `jq` instead of `python3 -c` (verified not to work: the natural jq form needs `for`/`$(…)`, which prompts for the same class of reason).
+
+**Rationale:** The measured prompt distribution was the opposite of the policy. The largest project-work bucket was a classifier bug — 26 prompts that were purely refusing `\|` inside a grep pattern — while genuinely consequential actions (`npm install`, `pip install numpy`, `apt install jq`, `git push origin main`) ran unprompted. Fixing the quoting false positive and adding the install/publish gate moves prompts onto the actions a human should actually answer for. Allowing read-only bash anywhere removes the inconsistency with the `read` tool instead of creating a second, stricter rule for the same action; the write scope, the `edit`/`write` gate, and the hard-block list are what actually hold the boundary.
+
+**Consequence:** after the change, replaying the clarke-flash session history drops prompts from 106 to 90 (allow 54 → 70), and of the 43 remaining project-only prompts, 33 are interpreter one-liners or heredocs kept by choice and the rest are `$(…)`/`$VAR` expansions. `python3 -c` and heredocs still prompt by design; recurring analysis belongs in a committed script (`python3 scripts/x.py` is free). The classifier suite grew 426 → 457 cases.
+
+**Known gap found while measuring:** `find . -delete` and `find . -exec rm {} ;` are auto-allowed inside the project — `dangerousReason` only catches `rm -rf`, and the `find` exec/delete flags are blocked by `UNSAFE_FLAGS` only in the safe-command path, not the scope path. Pre-existing (identical before this change), tracked for a follow-up.
+
+---
+
+## D-0033 — Bash is allow-by-default; only installs, network, outside writes, and destruction ask
+
+- **Date:** 2026-10-28
+- **Status:** accepted
+- **Supersedes:** the allowlist-based bash model of D-0029/D-0030 and the read-only-anywhere special case of D-0032
+
+**Decision:** The main-session bash gate inverts to **allow by default**. A local command runs without asking — `python3 -c`, `node -e`, `bash -c`, heredocs, `$(…)`, `$VAR`, `awk`, `sed`, `for` loops, `jq`, package scripts, `git commit`, `mv`, `mkdir`, and redirects into the project or temp dirs. Exactly four categories still ask: (1) installs and publishes (`npm/pnpm/yarn/bun install|add|ci`, `pip install`, `uv add`, `poetry add`, `cargo install`, `go get`, `gem install`, `brew install`, `apt/dnf/yum/pacman/conda/snap install`, `git push`, `git clone`) — allowlistable, never hard-blocked; (2) network commands (`curl`, `wget`, `ssh`, `scp`, `sftp`, `rsync`, `ftp`, `telnet`, `nc`); (3) writes outside the project, `~/.pi`, and the temp dirs, detected from redirect targets, the destination of `cp`/`rsync`/`scp`/`ln`/`install`, every argument of `mv`/`rm`/`mkdir`/`touch`/`tee`/`chmod`/`truncate`/`tar`, `dd of=`, output flags (`sed -i`, `sort -o`, `tree -o`, `less -o`, `uniq in out`, `git --output`), and `git -C`; (4) destructive local forms (`find` with `-delete`/`-exec`/`-execdir`/`-ok`/`-fprint*`, and recursive/non-recursive `rm`). The hard-block list and the `edit`/`write` tool gate are unchanged. Heredoc bodies are treated as data, not shell syntax. Allowing read-only bash anywhere (D-0032) becomes a special case of this and no longer needs its own rule.
+
+**Alternatives:** keep the allowlist model and keep widening it (measured cost: still 43 of 196 project-only commands prompted after D-0032, almost all interpreter one-liners, heredocs, and `$(…)`); allow only `python3 -c` and heredocs as an exception (an arbitrary boundary between inline and file-based code that means nothing); make the gate a sandbox (out of scope, and the user wants fewer prompts, not stronger isolation).
+
+**Rationale:** Proving a command "safe" was buying almost nothing. Arbitrary code was already reachable in two free steps — `write scripts/x.py` then `python3 scripts/x.py` — so blocking the inline spelling of the same thing was friction without a boundary. Meanwhile the measured prompt distribution was dominated by exactly that friction (43 project-only prompts, 33 of them `-c`/heredocs) while genuinely consequential actions were untouched. Inverting the default puts prompts where a human's answer changes the outcome: installing something new, reaching another machine, writing outside the workspace, and destroying work.
+
+**Consequence:** replaying 257 unique bash commands from the clarke-flash sessions goes from 106 asks (before D-0032) and 90 (after) to **0 asks, 1 hard-block, 256 allows**. `find -delete`/`-exec` now ask instead of running silently (a pre-existing hole closed). Installs and pushes now ask instead of running silently, which was the under-prompting half of the problem. Everything unanalysable — `$(…)`, heredocs, interpreter one-liners — is allowed by construction, so the shell classifier's fail-closed machinery now guards only the four ask categories. Classifier suite: 462 → 494 cases.
+
+**Consequence for the boundary:** the bash write-scope check is best-effort and no longer a boundary for a determined actor, because an allowed `python3 -c` can write anywhere. What holds is the hard-block list, the install/publish ask, the network ask, the accidental-write detection, and the `edit`/`write` tool gate. This is stated plainly in `governance/README.md` and `how-i-run-pi.md` rather than implied away.

@@ -76,7 +76,8 @@ export function uniqueResolved(paths: Array<string | undefined | null>): string[
 
 /**
  * What the main session may do with a write:
- *   - "allow"  inside the project or inside the pi config root (~/.pi)
+ *   - "allow"  inside the project, the pi config root (~/.pi), or the
+ *     system temp dirs (`/tmp`, `os.tmpdir()`)
  *   - "ask"    anywhere else (the existing prompt path)
  */
 export type WriteVerdict = "allow" | "ask";
@@ -92,6 +93,10 @@ export function mainWriteVerdict(absPath: string, scope: WriteScope): WriteVerdi
 	const target = path.resolve(absPath);
 	if (isInside(scope.projectRoot, target)) return "allow";
 	if (isInside(scope.piRoot, target)) return "allow";
+	// Temp dirs are free again (D-0031): scratch for genuinely temporary
+	// exploration code. `isInside` resolves symlinks, so a symlink inside a
+	// temp dir that points elsewhere still resolves outside and asks.
+	if (isInside("/tmp", target) || isInside(os.tmpdir(), target)) return "allow";
 	return "ask";
 }
 
@@ -212,7 +217,21 @@ export function unanalysableShell(command: string, { redirects = false } = {}): 
 			if (ch === "`") return "backtick command substitution";
 			if (ch === "$" && command[i + 1] === "(") return "$( command substitution";
 			if (ch === "$" && command[i + 1] === "{") return "${ parameter expansion";
-			if (ch === "\\") return "backslash escape in double quotes";
+			if (ch === "\\") {
+				// Inside double quotes only these backslashes can move a word or
+				// quote boundary: `\"` (ambiguous close), `\\` (could become a
+				// lone backslash before a quote), a line continuation, and a
+				// trailing backslash with nothing after it. Every other one is
+				// literal enough to leave the words intact, which is what makes
+				// ordinary patterns like `grep "a\|b"` analysable. Skipping the
+				// escaped character is safe: the backslash makes it literal.
+				const next = command[i + 1];
+				if (next === undefined || next === '"' || next === "\\" || next === "\n" || next === "\r") {
+					return "backslash escape in double quotes";
+				}
+				i++;
+				continue;
+			}
 			continue;
 		}
 		if (ch === "'" || ch === '"') {
@@ -815,23 +834,357 @@ export interface BashScope extends WriteScope {
 }
 
 /**
- * What the main session may do with a bash command:
- *   - "allow" when every path in it provably stays inside a trusted root and it
- *     is not an external/network command
- *   - "ask" otherwise (the caller runs the always-prompt list first)
+ * Commands that install software or publish to a remote. They are ordinary
+ * local work in every other respect, so they prompt (and can be remembered in
+ * an allowlist) rather than being hard-blocked. `sudo` in front is already
+ * caught by `dangerousReason`, so these never need superuser paths here.
+ */
+const INSTALL_OR_PUBLISH: RegExp[] = [
+	/^\s*(npm|pnpm|yarn|bun)\s+(install|i|add|ci|create|dlx|link)\b/i,
+	/^\s*(pip|pip3)\s+install\b/i,
+	/^\s*(uv)\s+(add|install|sync|lock|tool\s+install)\b/i,
+	/^\s*(poetry)\s+(add|install|lock)\b/i,
+	/^\s*(cargo)\s+(install|add)\b/i,
+	/^\s*(go)\s+(get|install)\b/i,
+	/^\s*(gem|bundle)\s+(install|add)\b/i,
+	/^\s*(brew)\s+(install|upgrade|reinstall|tap|bundle)\b/i,
+	/^\s*(apt|apt-get|dnf|yum|zypper|apk-add|apk|conda|mamba|snap)\s+(install|add)\b/i,
+	/^\s*pacman\s+(-[A-Za-z]*S[A-Za-z]*\b|--sync\b)/i,
+	/^\s*git\s+push\b/i,
+	/^\s*git\s+clone\b/i,
+];
+
+/** The install/publish form a segment names, or `null`. */
+export function installOrPublishReason(command: string): string | null {
+	for (const segment of splitShellSegments(command)) {
+		const candidate = stripLeadingAssignments(segment);
+		if (!candidate) continue;
+		for (const pattern of INSTALL_OR_PUBLISH) {
+			if (pattern.test(candidate)) return candidate.trim();
+		}
+	}
+	return null;
+}
+
+/**
+ * A command every segment of which is provably read-only: it is on the safe
+ * list (or is a plain `cd`), it carries no unsafe flag, and it redirects only
+ * to the harmless device forms. Such a command is allowed anywhere, matching
+ * the `read`/`grep`/`ls` tools, which were already free outside the project.
  *
- * The read-only safe list keeps its job: a safe command inside the roots is
- * allowed without any further analysis.
+ * Deliberately narrower than `isSafeBashCommand`: `mkdir`, `rm`, and redirects
+ * into free-write roots are all writes and must stay scope-checked.
+ */
+export function isReadOnlyCommand(command: string): boolean {
+	const trimmed = command.trim();
+	if (!trimmed) return false;
+	const cleaned = stripHarmlessDescriptors(trimmed);
+	if (unanalysableShell(cleaned, { redirects: true })) return false;
+	const segments = splitShellSegments(cleaned);
+	if (segments.length === 0) return false;
+	for (const segment of segments) {
+		const candidate = stripLeadingAssignments(segment);
+		if (!candidate) return false;
+		const words = shellWords(candidate);
+		// A bare `cd <dir>` only changes the shell's directory.
+		const isPlainCd = words.length === 2 && words[0] === "cd";
+		if (!isPlainCd && !SAFE_COMMAND_PATTERNS.some((p) => p.test(candidate))) return false;
+		const unquoted = words.join(" ");
+		for (const rule of UNSAFE_FLAGS) {
+			if (rule.command.test(unquoted) && rule.flags.test(unquoted)) return false;
+		}
+	}
+	return true;
+}
+
+/**
+ * Commands whose non-flag arguments name paths they write or delete. Any such
+ * path outside the trusted roots means the command crosses the boundary.
+ */
+const WRITE_COMMANDS = /^(?:cp|mv|rm|rmdir|mkdir|touch|tee|ln|chmod|chown|chgrp|mkfifo|mknod|truncate|shred|dd|rsync|scp|unzip|zip|tar|patch|install)$/;
+
+/** Commands that write only their last argument (their sources are reads). */
+const DEST_LAST = new Set(["cp", "rsync", "scp", "ln", "install"]);
+
+/**
+ * True when a redirect writes somewhere outside the trusted roots. A target
+ * that cannot be resolved to one literal path (glob, expansion, whitespace) is
+ * treated as outside: the gate cannot prove where the bytes land.
+ */
+function redirectTargetsOutside(command: string, roots: string[], baseDir: string): boolean {
+	const resolvedRoots = uniqueResolved(roots);
+	let quote: "'" | '"' | null = null;
+
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote === "'") {
+			if (ch === "'") quote = null;
+			continue;
+		}
+		if (quote === '"') {
+			if (ch === "\\" && i + 1 < command.length) {
+				i++;
+				continue;
+			}
+			if (ch === '"') quote = null;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			quote = ch;
+			continue;
+		}
+		if (ch === "\\" && i + 1 < command.length) {
+			i++;
+			continue;
+		}
+		if (ch !== ">") continue;
+		// `&>`, `>&2`, `>|`: descriptor duplication or noclobber, not a file write.
+		if (command[i - 1] === "&" || command[i + 1] === "&" || command[i + 1] === "|") continue;
+
+		let j = i + 1;
+		if (command[j] === ">") j++;
+		while (j < command.length && /[ \t]/.test(command[j])) j++;
+
+		let target: string;
+		const quoteChar = command[j];
+		if (quoteChar === '"' || quoteChar === "'") {
+			const end = command.indexOf(quoteChar, j + 1);
+			if (end < 0) return true;
+			target = command.slice(j + 1, end);
+			j = end + 1;
+		} else {
+			let k = j;
+			while (k < command.length && !/[\s;|&<>()]/.test(command[k])) k++;
+			target = command.slice(j, k);
+			j = k;
+		}
+
+		if (!target) return true;
+		if (!isAllowedDevicePath(target)) {
+			if (target.includes("$")) {
+				if (expansionPrefixOutside(target, resolvedRoots, baseDir)) return true;
+			} else if (GLOB_CHARS.test(target) || !LITERAL_REDIRECT_TARGET.test(target)) {
+				return true;
+			} else {
+				const abs = path.resolve(baseDir, expandHome(target));
+				if (!resolvedRoots.some((root) => isInside(root, abs))) return true;
+			}
+		}
+		i = j - 1;
+	}
+
+	return false;
+}
+
+/**
+ * Drop heredoc bodies: `<<'EOF' … EOF` content is data fed to a program, not
+ * shell syntax. Without this the body is scanned as commands and redirects, so
+ * a Python payload containing `>` (or a line starting with `rm`) reads as a
+ * write. Returns `null` for a payload with no heredoc, so callers can skip the
+ * work in the common case.
+ */
+function stripHeredocBodies(command: string): string | null {
+	if (!command.includes("<<")) return null;
+	const lines = command.split("\n");
+	const out: string[] = [];
+	let pending: string | null = null;
+	for (const line of lines) {
+		if (pending !== null) {
+			if (line.trim() === pending) pending = null;
+			continue;
+		}
+		out.push(line);
+		const match = line.match(/<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/);
+		if (match) pending = match[1];
+	}
+	return out.join("\n");
+}
+
+/**
+ * Where a `$`-containing path could land: only the static prefix before the
+ * first expansion is knowable. No prefix (`"$F"`) or a bare relative name is
+ * treated as staying inside, because the alternative is a prompt on every
+ * `> $LOGFILE` and the gate already permits arbitrary local code.
+ */
+function expansionPrefixOutside(word: string, roots: string[], baseDir: string): boolean {
+	// `$HOME` / `$TMPDIR` are knowable, so expand them: `> $HOME/.bashrc` is a
+	// real write outside the roots, not an opaque expansion.
+	const expanded = word
+		.replace(/^\$\{HOME\}/, os.homedir())
+		.replace(/^\$HOME(?=[/]|$)/, os.homedir())
+		.replace(/^\$\{TMPDIR\}/, os.tmpdir())
+		.replace(/^\$TMPDIR(?=[/]|$)/, os.tmpdir());
+	const firstVar = expanded.indexOf("$");
+	const prefix = firstVar < 0 ? expanded : expanded.slice(0, firstVar);
+	if (!prefix.includes("/")) return false;
+	const dir = prefix.slice(0, prefix.lastIndexOf("/") + 1);
+	const abs = resolveFromCwd(expandHome(dir), baseDir);
+	return !roots.some((root) => isInside(root, abs));
+}
+
+/** Is this path word outside every trusted root? Bare names resolve inside. */
+function pathWordOutside(word: string, roots: string[], baseDir: string): boolean {
+	if (!word || word.startsWith("-") || word === "--") return false;
+	if (isAllowedDevicePath(word)) return false;
+	if (word.includes("$")) return expansionPrefixOutside(word, roots, baseDir);
+	if (GLOB_CHARS.test(word)) return true;
+	const abs = resolveFromCwd(expandHome(word), baseDir);
+	return !roots.some((root) => isInside(root, abs));
+}
+
+/**
+ * Does this command write or delete something outside the trusted roots? Word
+ * based and best-effort: redirect targets plus the path arguments of commands
+ * that write by default. A `cd` inside the chain moves the base directory, so
+ * `cd ~/x && rm y` resolves `y` where the shell would.
+ */
+/**
+ * Commands that write through a flag rather than a positional argument:
+ * `sed -i`, `sort -o`, `tree -o`, `less -o`, `uniq in out`, `git --output`.
+ * The flag value (or the second positional) is the target that must stay in
+ * the roots; their other arguments are ordinary reads.
+ */
+function outputFlagTargetOutside(command: string, roots: string[], baseDir: string): boolean {
+	const words = shellWords(command);
+	const cmd = words[0];
+	if (!cmd) return false;
+	const outside = (word?: string): boolean => Boolean(word) && pathWordOutside(word as string, roots, baseDir);
+	const flagValue = (...flags: string[]): string | undefined => {
+		for (let i = 1; i < words.length; i++) {
+			const word = words[i];
+			if (flags.includes(word)) return words[i + 1];
+			for (const flag of flags) {
+				if (word.startsWith(`${flag}=`)) return word.slice(flag.length + 1);
+				// Attached short-flag value: `-o/etc/x`, `-oout`.
+				if (/^-[A-Za-z]$/.test(flag) && word.startsWith(flag) && word.length > flag.length) {
+					return word.slice(flag.length);
+				}
+			}
+		}
+		return undefined;
+	};
+
+	if (cmd === "sed") {
+		// Only `-i` rewrites in place; without it `sed` writes nothing but stdout.
+		const flagged = words.slice(1).join(" ");
+		if (!/(^|\s)-[A-Za-z]*i[A-Za-z]*(\s|$)/.test(flagged)) return false;
+		// Every non-flag argument is a file sed rewrites in place.
+		return words.slice(1).some((word) => !word.startsWith("-") && outside(word));
+	}
+	if (cmd === "sort" || cmd === "tree" || cmd === "less") return outside(flagValue("-o", "--output"));
+	if (cmd === "uniq") {
+		const positionals = words.slice(1).filter((word) => !word.startsWith("-"));
+		return positionals.length >= 2 && outside(positionals[1]);
+	}
+	if (cmd === "git") return outside(flagValue("--output"));
+	return false;
+}
+
+function writesOutsideRoots(command: string, roots: string[], startDir: string): boolean {
+	let base = startDir;
+	for (const rawSegment of splitShellSegments(command)) {
+		const segment = stripHarmlessDescriptors(rawSegment);
+		if (redirectTargetsOutside(segment, roots, base)) return true;
+		if (outputFlagTargetOutside(segment, roots, base)) return true;
+		const candidate = stripLeadingAssignments(segment);
+		if (!candidate) continue;
+		const words = shellWords(candidate);
+		if (words.length === 0) continue;
+
+		// Track `cd` so relative write targets resolve where the shell would.
+		if (words[0] === "cd" && words.length === 2 && !words[1].includes("$")) {
+			base = resolveFromCwd(expandHome(words[1]), base);
+			continue;
+		}
+
+		// `git -C <dir>` inspects another repository.
+		if (words[0] === "git") {
+			const at = words.indexOf("-C");
+			if (at >= 0 && words[at + 1] && pathWordOutside(words[at + 1], roots, base)) return true;
+			continue;
+		}
+
+		if (!WRITE_COMMANDS.test(words[0])) continue;
+		const command = words[0];
+		// `cp`/`rsync`/`scp`/`ln`/`install` only write their destination, so only
+		// that word crosses the boundary; the sources are ordinary reads. `mv`
+		// removes its sources, which is a write wherever they live.
+		if (DEST_LAST.has(command)) {
+			const args = words.slice(1).filter((w) => w !== "--" && !w.startsWith("-"));
+			const dest = args[args.length - 1];
+			if (dest && pathWordOutside(dest, roots, base)) return true;
+			continue;
+		}
+		for (const word of words.slice(1)) {
+			// `dd` writes only through `of=`.
+			if (command === "dd") {
+				if (word.startsWith("of=") && pathWordOutside(word.slice(3), roots, base)) return true;
+				continue;
+			}
+			if (pathWordOutside(word, roots, base)) return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Destructive forms that are recoverable enough to ask about rather than
+ * hard-block: recursive removal, and `find`'s delete/exec forms. These ask even
+ * inside the project, because they destroy uncommitted work in one keystroke.
+ */
+export function destructiveAskReason(command: string): string | null {
+	for (const segment of splitShellSegments(command)) {
+		const words = shellWords(segment);
+		const cmd = words[0];
+		if (cmd === "find") {
+			if (
+				words.some(
+					(w) =>
+						w === "-delete" ||
+						w === "--delete" ||
+						w === "-exec" ||
+						w === "-execdir" ||
+						w === "-ok" ||
+						w === "-fprint" ||
+						w === "-fprintf" ||
+						w === "-fls",
+				)
+			) {
+				return "find with -delete/-exec/-fprint";
+			}
+		}
+	}
+	return hasRecursiveRemove(command) ? "recursive removal" : null;
+}
+
+/**
+ * What the main session may do with a bash command:
+ *   - "ask" only for the things a human should answer for: installs and
+ *     publishes, network commands, writes outside the trusted roots, and
+ *     destructive file operations
+ *   - "allow" for everything else, local work included (D-0033)
+ *
+ * This is deliberately allow-by-default. The gate is not a sandbox: arbitrary
+ * local code can already be run by writing a script into the project and
+ * executing it, so proving a command "safe" buys little. The curated ask list
+ * is the part that carries information.
  */
 export function mainBashVerdict(command: string, scope: BashScope): "allow" | "ask" {
 	const trimmed = command.trim();
 	if (!trimmed) return "ask";
+	// Heredoc bodies are data, not shell syntax: analyse only the command text.
+	const shell = stripHeredocBodies(trimmed) ?? trimmed;
+	// Installing software or publishing to a remote: a human decision.
+	if (installOrPublishReason(shell)) return "ask";
+	// Network commands leave the machine and are rare enough to be worth a look.
+	if (externalCommandReason(shell)) return "ask";
+	// Destruction of local work is a human decision too.
+	if (destructiveAskReason(shell)) return "ask";
+	// Read-only work never crosses the boundary, wherever it points.
+	if (isReadOnlyCommand(shell)) return "allow";
+	// Writing outside the project, ~/.pi, and the temp dirs crosses the boundary.
 	const roots = uniqueResolved([scope.projectRoot, scope.piRoot, ...uniqueResolved(scope.readRoots ?? [])]);
-	// Nothing outside the roots is provable, read-only or not.
-	if (bashScopeEscape(trimmed, roots) !== null) return "ask";
-	if (isSafeBashCommand(trimmed, scope.projectRoot, roots, roots)) return "allow";
-	if (externalCommandReason(trimmed)) return "ask";
-	if (hasRecursiveRemove(trimmed)) return "ask";
+	if (writesOutsideRoots(shell, roots, scope.projectRoot)) return "ask";
 	return "allow";
 }
 

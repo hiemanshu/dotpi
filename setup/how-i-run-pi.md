@@ -49,20 +49,23 @@ Setup documentation about the agent itself goes in `~/.pi/setup/`, never in a pr
 
 Implemented with the `tool_call` hook: every tool call is classified before it runs.
 
+**Bash is allow-by-default (D-0033).** A local command runs without asking — `python3 -c`, `node -e`, `bash -c`, heredocs, `$(…)`, `$VAR`, `awk`, `sed`, `for` loops, `jq`, package scripts, `git commit`, `mv`, `mkdir`, redirects into the project or temp dirs. Only four categories ask.
+
 ### Main session — auto-allowed
 
 - `read`, `grep`, `find`, `ls` — anywhere.
-- **Writes and edits inside the project and inside `~/.pi`** — the whole tree: source, config, extensions, agents, prompts, docs, `settings.json`. Writes outside both prompt.
-- Read-only bash from a minimal safe list: `cat head tail grep ls eza pwd wc diff stat du df tree which whereis type printenv uname whoami id date ps jq`, `rg` (no `--pre`), `find`/`fd` (no `-exec/-delete/-fprint`), `git status|log|diff|show|branch --show-current|remote -v|config --get|ls-files|rev-parse|describe|blame|shortlog|stash list`, `npm list|view|info|search|outdated|audit`, `node|python3 --version`.
+- **Writes and edits inside the project, inside `~/.pi`, and inside the temp dirs (`/tmp`, `os.tmpdir()`)** — the whole tree: source, config, extensions, agents, prompts, docs, `settings.json`. The temp dirs are scratch for throwaway/exploration code; durable code belongs in the project. Writes outside all three prompt.
+- Read-only bash from a minimal safe list, **anywhere** — `cat head tail grep ls eza pwd wc diff stat du df tree which whereis type printenv uname whoami id date ps jq`, `rg` (no `--pre`), `find`/`fd` (no `-exec/-delete/-fprint`), `git status|log|diff|show|branch --show-current|remote -v|config --get|ls-files|rev-parse|describe|blame|shortlog|stash list`, `npm list|view|info|search|outdated|audit`, `node|python3 --version`. This matches the `read`/`grep`/`ls` tools, which were never scoped, so `cat /etc/hosts`, `grep -r x /`, and `cd /etc && ls` do not prompt (D-0032).
+- **Everything else local** — interpreter one-liners, heredocs, substitutions, any command that does not write outside the roots.
 - Bash that provably stays inside the project or `~/.pi` even when it is not on the safe list: `node …/x.test.ts`, `npm test`, `git commit`, `mv`, `mkdir`, `cp`, and plain `>`, `>>`, `n>` redirects whose target is inside a trusted root.
 - `cd` into the project, `~/.pi`, the pi installation directory, `/tmp`, the OS temp dir, and configured `read` roots. Later segments of the same chain resolve relative paths against the directory reached.
 - The `questionnaire` tool.
 
-`sed`, `awk`, `sort`, `uniq`, `curl`, `wget`, `less`, and `file` are **not** on the safe list: each can write a file or execute code with a single flag. Inside the project they still run if every path stays in scope; otherwise they prompt and can be allowlisted. `echo`/`printf` are safe (they cannot write without a redirect); a redirect is only stripped when its target is inside a trusted root. Network tools (`curl`, `wget`, `ssh`, `scp`, `rsync`, …) always prompt because they have no path to scope.
+`sed`, `awk`, `sort`, `uniq`, `curl`, `wget`, `less`, and `file` are not on the read-only safe list, but under allow-by-default that no longer blocks them — `sed -i`, `sort -o`, `uniq in out`, and `less -o` run, and only ask when their output target lands outside the trusted roots. Network tools (`curl`, `wget`, `ssh`, `scp`, `rsync`, …) always prompt because they leave the machine.
 
 ### Main session — prompts
 
-Every write/edit outside the project and `~/.pi`, every bash command that reaches outside those roots, and every network command. Dialog offers: **allow once**, **remember this file/folder or exact command in the project**, **remember everywhere**, **deny**. Rules are stored in:
+Every write/edit outside the project, `~/.pi`, and the temp dirs; every **install or publish** (`npm install`, `pip install`, `uv add`, `cargo install`, `brew install`, `apt install`, `git push`, `git clone`, …); every network command (`curl`, `wget`, `ssh`, `scp`, `rsync`, `nc`, …); every bash command that **writes** outside those roots; and destructive local forms (`find -delete`/`-exec`, `rm -r`). Dialog offers: **allow once**, **remember this file/folder or exact command in the project**, **remember everywhere**, **deny**. Rules are stored in:
 
 - `<project>/.pi/permissions.local.json` — project scope
 - `~/.pi/agent/permissions.json` — global scope
@@ -152,7 +155,7 @@ Agent definitions omit `model`, so they inherit the session model. Explicit `too
 5. Add `agents/`, `prompts/`, and `AGENTS.md`.
 6. Create the allowlist files (empty is fine) and gitignore `.pi/permissions.local.json`.
 7. Run `/reload` (or restart pi) and test:
-   - write outside the project and `~/.pi` → prompts,
+   - write outside the project, `~/.pi`, and the temp dirs → prompts,
    - write and test inside the project → no prompt,
    - read-only `ls` → no prompt,
    - `sudo ...` → hard block; `/i-understand-the-danger` + passcode → allowed once,
