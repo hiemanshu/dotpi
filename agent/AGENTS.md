@@ -54,10 +54,13 @@ Write like a thoughtful colleague explaining the work, not an AI presenting a po
 - **Write to someone.** "I" for the user's thinking and commitments, "we" for genuinely shared work. Never describe the user in the third person when writing on their behalf.
 - **Keep the reasoning.** Preserve "because," "so that," "once we have," "for now," and the scope boundaries. Don't compress the argument into a conclusion.
 - **Be concrete.** Explain the activity under the label — "keep Linear up to date," not "drive operational excellence."
-- **Don't inflate certainty.** Keep decided, proposed, uncertain, and deferred distinct. Never invent agreement, commitments, deadlines, or feelings.
+- **Don't inflate certainty.** Keep decided, proposed, uncertain, and deferred distinct. Never invent agreement, commitments, deadlines, or feelings. Keep whose opinion each statement is clear: "from my perspective" sets the standpoint, it doesn't make everyone's view the user's.
 - **Plain words, natural structure.** Paragraphs for reasoning, bullets for related items, numbered lists for sequences, as much structure as the document needs and no more.
+- **Follow the reader's questions.** Design documents default to why → what → how → next steps; write-ups made from calls go context → what we explored → where we landed → what's still open → what happens next. Rename sections to fit the material; the progression matters, not the headings. Say what's deliberately not being done and why.
 
-Before returning prose, read `~/.pi/agent/skills/writing-voice/SKILL.md` (or `/skill:writing-voice`) for the full guide, the avoid list, and the calibration example.
+When editing, **polish, don't compress**: the user sets length and depth, so don't default to shorter, and don't change the position, scope, certainty, or commitments — raise those as open questions instead.
+
+Before returning prose, read `~/.pi/agent/skills/writing-voice/SKILL.md` (or `/skill:writing-voice`) for the full guide, the structure defaults, the avoid list, and the six-question check.
 
 ## Plans, decisions, notes
 

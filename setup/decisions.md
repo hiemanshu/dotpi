@@ -474,3 +474,35 @@ The split uses an explicit per-frame `basis` (58% chat / 42% code) because pi-tu
 **Rationale:** The two failure modes pull in opposite directions — context cost versus silently not applying. A skill keeps the long guide out of context until writing actually happens, and the short AGENTS.md summary means a model that skips the skill still writes with the reasoning kept and the concrete verbs in place. Splitting them also gives one place to fix drift: the skill is the source of truth, the summary defers to it.
 
 **Consequence:** The voice now applies to commit messages and chat replies as well as documents, so agents will sound less like a status report in ordinary conversation. The summary and the skill can drift; the decision is that the skill wins and the summary is edited to match. Project `AGENTS.md` files can still override the voice where a repo has its own convention, which is the same precedence rule as everything else in this file.
+
+---
+
+## D-0035 — Document structure lives with the voice, as defaults rather than templates
+
+- **Date:** 2026-10-28
+- **Status:** accepted
+- **Refines:** D-0034
+
+**Decision:** The `writing-voice` skill gains a **Document structure** section: two default spines — design documents go why → what → how → next steps (with goals/non-goals, open questions, and supporting detail where they earn their place), call-derived write-ups go context → what we explored → where we landed → what's still open → what happens next — each as a *section / belongs there / leave out* table, followed by the preferences underneath both (lead with the outcome, explain scope boundaries, treat the doc as a record of conversations, make changed plans visible, keep reasoning with its topic, omit empty sections). The existing `## Structure` section is renamed `## Formatting` so "structure" means layout only once.
+
+**Alternatives:** keep the voice guide purely about sentences and let each document invent its own shape (the shape was the part actually drifting into report territory); ship the spines as a template file with the headings pre-filled (invites literal reproduction and headings that don't fit the material); impose one rule on alternatives sections (the sources disagree — inline in one doc, a separate section in another, and the user's analysis explicitly declines to legislate); put the full tables in `AGENTS.md` alongside the five non-negotiables (the always-on summary would triple in size for guidance that only matters when writing a document).
+
+**Rationale:** Voice and arrangement fail together. A document with the right sentences in the wrong order still reads as a report, so the guidance belongs in the same skill rather than a separate one. Making each section a table with a "leave out" column is the part the pasted analysis didn't have and the part that does the work: knowing that a *Why* section shouldn't contain architecture is more actionable than knowing it should contain context. Naming the spines "defaults" and the headings "renameable" keeps them from hardening into a house template, which is the failure the voice guide warns about.
+
+**Consequence:** Agents will produce design docs and call write-ups in a predictable order without being asked, and can be corrected by editing one table. The "don't repeat points across summary, decisions, and conclusion" rule now sits in tension with "keep the reasoning" — the resolution recorded in the skill is that reasoning stays with the topic it belongs to rather than being duplicated. Meeting prep and role definitions still have no spine of their own; the shared principle covers them until there's evidence they need more.
+
+---
+
+## D-0036 — Worked examples over adjectives; one check instead of two
+
+- **Date:** 2026-10-28
+- **Status:** accepted
+- **Refines:** D-0034, D-0035
+
+**Decision:** The `writing-voice` skill carries three worked examples — a personal hand-off, a design-document excerpt, and a team-shareable call recap — rather than more descriptive rules, each followed by a "what to take from it" line naming the reasoning it demonstrates. They are labelled as polished adaptations of material reviewed with the user, not quotations and not approved samples. The skill's two overlapping self-checks collapse into one ordered six-part review: fidelity, reasoning, structure, polish, length, unsupported additions.
+
+**Alternatives:** keep the single too-generic / in-the-voice pair (cheap, but it only demonstrates one mode — the design doc and the call recap behave differently); write fresh illustrative examples (would be demonstrating an idea of the voice rather than the voice, and would need labelling as invented anyway); keep both checklists (they ask the same review in different orders, so a model would skim one); ship the examples as separate reference files (three more reads for material that fits in one).
+
+**Rationale:** Examples calibrate better than adjectives — "leave out architecture in the Why section" is a rule, but seeing a Why section that doesn't contain architecture is what a model actually copies. Labeling them as adaptations keeps the honest boundary: they show reasoning and shape, not wording to reuse, and the user hasn't signed off on them as representative. Merging the checks was the same argument in small: two lists covering one review mean the second gets skimmed, and the eight questions the skill used to ask all survive inside the six groups.
+
+**Consequence:** The skill is now ~3,100 words and reads as a reference rather than a list of rules; it only loads when prose is being written, which is why the always-on `AGENTS.md` summary stayed at five bullets. The examples contain real names and internal product names (Tiffany, Sam, Alex, Vanta, ConfigCat, PostHog, Bedrock), so the file is private-repo material — redaction is a per-name edit if the guide is ever shared.
