@@ -18,6 +18,7 @@ Default model: **`opencode-go/deepseek-v4.1-flash`**.
 | `agent/extensions/subagent/` | Subagent launches, project scoping, background jobs |
 | `agent/extensions/questionnaire.ts` | Batched multiple-choice questions |
 | `agent/agents/` | `scout`, `planner`, `reviewer`, `worker`, `tester`, `documenter` |
+| `agent/skills/writing-voice/` | Hiemanshu's document voice: on-demand full guide, summarised in `AGENTS.md` |
 | `agent/prompts/` | `/implement`, `/scout-and-plan`, `/implement-and-review`, `/document` |
 | `agent/themes/opencode.json` | Tokyo Night palette (theme name `opencode`) |
 | `setup/` | Setup plans (`0001`…`0015`), decisions (`D-0001`…`D-0030`), notes, bootstrap summary |
@@ -43,6 +44,9 @@ Default model: **`opencode-go/deepseek-v4.1-flash`**.
   `/i-understand-the-danger`.
 - **Web lookups** go through MCP tools (`mcp__websearch__web_search`,
   `mcp__websearch__web_fetch`) instead of `curl`.
+- **Voice:** prose written for you sounds like you explaining the work to a
+  teammate. The full guide is the `writing-voice` skill; the non-negotiables are
+  summarised in `AGENTS.md`.
 
 ## Web search
 
@@ -98,6 +102,7 @@ Both segments go compact on narrow terminals (`◐93%`, `⚡142 · 0.9s`).
 | `/jobs` | List background subagent jobs; `/jobs cancel <id\|all>` |
 | `/i-understand-the-danger` | One-time passcode for one hard-blocked command |
 | `/document` | Record the current work in `docs/` via the documenter |
+| `/skill:writing-voice` | Load the full writing-voice guide |
 
 pi's own `/reload`, `/resume`, `/model`, `/thinking`, `/mcp`, and `/tree` work as
 usual; `/mcp` inspects or changes server exposure.

@@ -459,3 +459,18 @@ The split uses an explicit per-frame `basis` (58% chat / 42% code) because pi-tu
 **Consequence:** replaying 257 unique bash commands from the clarke-flash sessions goes from 106 asks (before D-0032) and 90 (after) to **0 asks, 1 hard-block, 256 allows**. `find -delete`/`-exec` now ask instead of running silently (a pre-existing hole closed). Installs and pushes now ask instead of running silently, which was the under-prompting half of the problem. Everything unanalysable — `$(…)`, heredocs, interpreter one-liners — is allowed by construction, so the shell classifier's fail-closed machinery now guards only the four ask categories. Classifier suite: 462 → 494 cases.
 
 **Consequence for the boundary:** the bash write-scope check is best-effort and no longer a boundary for a determined actor, because an allowed `python3 -c` can write anywhere. What holds is the hard-block list, the install/publish ask, the network ask, the accidental-write detection, and the `edit`/`write` tool gate. This is stated plainly in `governance/README.md` and `how-i-run-pi.md` rather than implied away.
+
+---
+
+## D-0034 — Writing voice is a skill plus an always-on summary
+
+- **Date:** 2026-10-28
+- **Status:** accepted
+
+**Decision:** How Hiemanshu writes is captured as an on-demand skill, `~/.pi/agent/skills/writing-voice/SKILL.md` (perspective, reasoning, concreteness, language, structure, tone, avoid list, editing standard, calibration example), backed by a five-line non-negotiable summary in `agent/AGENTS.md`. Scope is **all prose** — plans, decisions, notes, hand-offs, proposals, role definitions, meeting prep, READMEs, commit messages, PR descriptions, and chat replies a teammate reads — not just `docs/`. The `documenter` agent must load the skill before drafting.
+
+**Alternatives:** put the whole guide in `AGENTS.md` (guaranteed to load, but 90-odd lines of style rules in every session including pure code work); skill only, with no inline summary (cheap, but a model that doesn't invoke the skill falls back to its default report voice); a lint or gate check (the gate guards actions that carry risk, not prose quality); a prompt template (only applies when invoked explicitly, and the voice has to hold unprompted).
+
+**Rationale:** The two failure modes pull in opposite directions — context cost versus silently not applying. A skill keeps the long guide out of context until writing actually happens, and the short AGENTS.md summary means a model that skips the skill still writes with the reasoning kept and the concrete verbs in place. Splitting them also gives one place to fix drift: the skill is the source of truth, the summary defers to it.
+
+**Consequence:** The voice now applies to commit messages and chat replies as well as documents, so agents will sound less like a status report in ordinary conversation. The summary and the skill can drift; the decision is that the skill wins and the summary is edited to match. Project `AGENTS.md` files can still override the voice where a repo has its own convention, which is the same precedence rule as everything else in this file.

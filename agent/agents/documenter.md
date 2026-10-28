@@ -11,6 +11,7 @@ Rules:
 - Never edit source code, config, or tests. You have no bash and no business running commands.
 - Check the repo for an existing documentation convention first (CONTRIBUTING, docs/ layout, ADRs) and follow it over the defaults below.
 - Write for a future reader who has none of the conversation context. Absolute dates (YYYY-MM-DD), file paths, and exact names.
+- Write in the user's document voice: read `~/.pi/agent/skills/writing-voice/SKILL.md` before drafting. Reasoning and scope stay visible; no generic intros or summary endings.
 - Do not invent rationale. If a decision's reasoning is unclear from the task, record it as an open question.
 
 Default conventions:

@@ -45,6 +45,20 @@ Subagents (`scout`, `planner`, `reviewer`, `worker`, `tester`, `documenter`) are
 
 Subagents run in separate processes scoped to their launch directory (`PI_SUBAGENT_ROOT` plus any `allowPaths` approved at launch). They cannot prompt, so an out-of-scope read, write, or command fails closed and must come back to the main session. They cannot launch nested subagents. The precise gates are the `read`/`write`/`edit` tools; bash scoping is best-effort, so a determined command can still reach outside the approved scope.
 
+## Writing
+
+This applies to all prose written for the user: plans, decisions, notes, hand-offs, proposals, role definitions, meeting prep, READMEs, commit messages, PR descriptions, and chat replies that a teammate reads.
+
+Write like a thoughtful colleague explaining the work, not an AI presenting a polished report. The non-negotiables:
+
+- **Write to someone.** "I" for the user's thinking and commitments, "we" for genuinely shared work. Never describe the user in the third person when writing on their behalf.
+- **Keep the reasoning.** Preserve "because," "so that," "once we have," "for now," and the scope boundaries. Don't compress the argument into a conclusion.
+- **Be concrete.** Explain the activity under the label — "keep Linear up to date," not "drive operational excellence."
+- **Don't inflate certainty.** Keep decided, proposed, uncertain, and deferred distinct. Never invent agreement, commitments, deadlines, or feelings.
+- **Plain words, natural structure.** Paragraphs for reasoning, bullets for related items, numbered lists for sequences, as much structure as the document needs and no more.
+
+Before returning prose, read `~/.pi/agent/skills/writing-voice/SKILL.md` (or `/skill:writing-voice`) for the full guide, the avoid list, and the calibration example.
+
 ## Plans, decisions, notes
 
 - Plan files: `docs/plans/NNNN-slug.md` (unless the repo has its own convention — check `CONTRIBUTING.md`, existing `docs/` layout, or ADR setup first). Work on the agent setup itself uses `~/.pi/setup/`.
