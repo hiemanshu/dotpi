@@ -159,6 +159,24 @@ unsettled rather than closing it on the reader's behalf.
   like a report.
 - **Omit empty sections.** A heading with nothing under it suggests the work
   wasn't done.
+- **Why stops at the problem.** It names the situation, the cost, and the
+  evidence. It doesn't introduce the split, the fallback, the build artifact, or
+  the performance numbers; those belong in What and How. If the last sentence
+  starts with "So", the solution is leaking in.
+- **What is the product, not the plan.** Describe the end state and the ways it
+  can work. Delivery phases and milestone boundaries belong in How or Next steps;
+  putting them in What makes the reader learn the plan before they know what
+  they're getting.
+- **Goals match the What.** Describe the end state and the trade-offs the product
+  accepts; phase scope belongs with the milestones in How or Next steps.
+- **Price the first call.** When comparing approaches, say where the one-time
+  cost lands, not just the steady-state number.
+- **How is the work, not the interface.** Describe the pieces you have to build
+  (compiler, runtime, installer) independently of the delivery mode or
+  integration surface; that keeps the section stable when the interface changes.
+- **Measurements are evidence, not goals.** Put numbers in the performance
+  section and let the harness set the threshold. A numeric goal becomes a rule
+  you have to keep defending.
 
 ### Alternatives: inline or their own section
 
@@ -210,6 +228,11 @@ a claim. If an edit would require any of those to change, make it an open
 question rather than a rewrite.
 
 Polish is not compression. Don't default to making everything shorter.
+
+When the ask is specifically to compress, keep the concrete opening and collapse
+the justification behind it into one paragraph: the repeated cost, the split,
+and the decision. Cut facts that only restate what the opening already showed.
+Keep the numbers and constraints that change the design.
 
 ## Calibration
 
