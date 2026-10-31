@@ -4,6 +4,15 @@
       "url": "https://search.parallel.ai/mcp",
       "exposure": "direct",
       "description": "Web search and web fetch (Parallel, via opencode's search backend). Read-only."
+    },
+    "rea": {
+      "type": "stdio",
+      "exposure": "deferred",
+      "command": "C:\\Users\\hiema\\AppData\\Local\\mise\\installs\\node\\26.13.0\\node.exe",
+      "args": [
+        "C:\\Users\\hiema\\AppData\\Local\\mise\\installs\\npm-rea-agents\\latest\\node_modules\\.mise\\rea-agents@6.8.0\\node_modules\\rea-agents\\scripts\\rea.mjs",
+        "mcp"
+      ]
     }
   }
 }
