@@ -14,9 +14,10 @@ export interface AllowRules {
 	write: string[];
 	bash: string[];
 	read: string[];
+	mcp: string[];
 }
 
-export const EMPTY_RULES: AllowRules = { write: [], bash: [], read: [] };
+export const EMPTY_RULES: AllowRules = { write: [], bash: [], read: [], mcp: [] };
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -1222,9 +1223,10 @@ export function loadRules(filePath: string): AllowRules {
 			write: Array.isArray(parsed?.write) ? parsed.write.filter((x): x is string => typeof x === "string") : [],
 			bash: Array.isArray(parsed?.bash) ? parsed.bash.filter((x): x is string => typeof x === "string") : [],
 			read: Array.isArray(parsed?.read) ? parsed.read.filter((x): x is string => typeof x === "string") : [],
+			mcp: Array.isArray(parsed?.mcp) ? parsed.mcp.filter((x): x is string => typeof x === "string") : [],
 		};
 	} catch {
-		return { write: [], bash: [], read: [] };
+		return { write: [], bash: [], read: [], mcp: [] };
 	}
 }
 
@@ -1234,13 +1236,14 @@ export function saveRules(filePath: string, rules: AllowRules): void {
 		write: rules.write ?? [],
 		bash: rules.bash ?? [],
 		read: rules.read ?? [],
+		mcp: rules.mcp ?? [],
 	};
 	const tmp = `${filePath}.tmp`;
 	fs.writeFileSync(tmp, `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");
 	fs.renameSync(tmp, filePath);
 }
 
-export function addRule(rules: AllowRules, kind: "write" | "bash", value: string): void {
+export function addRule(rules: AllowRules, kind: "write" | "bash" | "mcp", value: string): void {
 	if (!rules[kind].includes(value)) rules[kind].push(value);
 }
 
@@ -1290,4 +1293,45 @@ export function matchBashRule(rule: string, command: string): boolean {
 		return normalized === base || normalized.startsWith(`${base} `);
 	}
 	return normalized === r;
+}
+
+/** Every MCP tool pi exposes is named `mcp__<server>__<tool>`. */
+export const MCP_TOOL_PREFIX = "mcp__";
+
+/**
+ * MCP tool rule forms:
+ *   - `mcp__rea__inspect_artifact` — exactly that tool
+ *   - `mcp__rea__*` — every tool the `rea` server offers
+ *
+ * A rule that does not start with `mcp__` never matches, so a stray `*` (or a
+ * bash/write pattern that found its way into this list) cannot become a
+ * catch-all over every MCP tool.
+ */
+export function matchMcpRule(rule: string, tool: string): boolean {
+	const r = rule.trim();
+	const t = tool.trim();
+	if (!r.startsWith(MCP_TOOL_PREFIX)) return false;
+	if (r.endsWith("*")) return t.startsWith(r.slice(0, -1));
+	return t === r;
+}
+
+/** `mcp__rea__inspect_artifact` -> `rea`; null when there is no server part. */
+export function mcpServerOf(tool: string): string | null {
+	const t = tool.trim();
+	if (!t.startsWith(MCP_TOOL_PREFIX)) return null;
+	const rest = t.slice(MCP_TOOL_PREFIX.length);
+	const separator = rest.indexOf("__");
+	if (separator <= 0) return null;
+	return rest.slice(0, separator);
+}
+
+/**
+ * The server-wide rule for a tool name or a bare server name. pi replaces any
+ * character outside `[A-Za-z0-9_-]` with `_` when it builds tool names, so the
+ * same mangling here keeps the stored pattern matching what pi presents.
+ */
+export function mcpServerRule(toolOrServer: string): string {
+	const server = mcpServerOf(toolOrServer) ?? toolOrServer;
+	const mangled = server.trim().replace(/[^A-Za-z0-9_-]+/g, "_");
+	return `${MCP_TOOL_PREFIX}${mangled}__*`;
 }

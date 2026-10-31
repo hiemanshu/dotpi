@@ -44,6 +44,7 @@ project or `~/.pi`, or is irreversible. Enforced with `tool_call` hooks.
 - `<agent-dir>/permissions.json` — global allowlist
 - `utils.ts` — classification, scoping, allowlist matching (no pi imports; testable)
 - `cache.ts` — cache-hit summary for the footer (pure): session rate, last-call bucket, formatting.
+- `mcp.test.ts` — MCP rule matching and persistence (24 cases): exact vs server-wide rules, cross-server and prefix-collision non-matches, server derivation, and the round-trip proving a bash-rule save keeps existing `mcp` rules.
 - `throughput.ts` — live tok/s + TTFT tracker, footer segment text (`throughputParts`), and formatters (pure, injectable clock). The rate counts every generated token — text, thinking, and tool-call argument JSON — matching `usage.output` (D-0028); tool results and nested tool usage are excluded. An estimated rate gets `~`, and `≈` marks a rate that still includes startup.
 - `index.ts` — the extension
 
@@ -53,14 +54,25 @@ project or `~/.pi`, or is irreversible. Enforced with `tool_call` hooks.
 {
   "write": ["~/Downloads/work/", "/home/me/shared/notes/"],
   "bash": ["npm test", "git status *"],
-  "read": ["~/other-repo/"]
+  "read": ["~/other-repo/"],
+  "mcp": ["mcp__rea__inspect_artifact", "mcp__websearch__*"]
 }
 ```
 
 - Write rules: exact file paths, or directories ending in `/`. Relative paths resolve from the project root. A leading `~` expands to the user's home directory; folder approvals saved as "everywhere" are stored home-relative when possible (for example `~/.pi/`).
 - Read rules: extra directory roots that read-only bash may `cd` into. They extend `cd` trust only; no command is auto-approved just because its absolute paths sit under a read root. Same path forms as write rules; entries are always treated as roots (trailing `/` is conventional). Read rules never grant writes.
 - Bash rules: exact commands after whitespace normalization, or prefix rules ending in ` *`.
+- MCP rules: an exact tool name (`mcp__rea__inspect_artifact`) allows one tool; a rule ending in `*` (`mcp__rea__*`) allows every tool that server offers. A rule that does not start with `mcp__` never matches, so a stray `*` cannot become a catch-all. Matching is case-sensitive, since pi preserves case in tool names.
 - Hard-blocked commands cannot be configured here. The trusted roots (the project, `~/.pi`, and the temp dirs) are fixed in `utils.ts`, not configurable in these files; `write` rules only affect the prompt path for writes outside them, so an existing `~/.pi/` entry is inert for the main gate.
+
+### MCP tools
+
+An MCP tool that no rule covers asks once. The dialog offers the whole server (`Always allow all tools from <server>`) or just that tool, at project or global scope, and shows the tool name plus a truncated preview of its arguments. Server-wide options come first because a 200-tool server would otherwise train you to click through 200 prompts.
+
+- Denials are not remembered: the next call asks again, so a block stays visible.
+- `mcp__websearch__` is prefix-allowed and never prompts.
+- Subagents cannot prompt, so an unlisted MCP tool fails closed there.
+- Rules are plain strings in the allowlist files, so a new server needs no code change — at most one dialog.
 
 ## TUI chrome
 
@@ -90,6 +102,7 @@ project or `~/.pi`, or is irreversible. Enforced with `tool_call` hooks.
 - Network commands (`curl`, `wget`, `ssh`, `scp`, `sftp`, `rsync`, `ftp`, `telnet`, `nc`, `ncat`, `nmap`, …) always prompt: they have no path argument the gate could scope. Allowlist the exact form if it becomes routine.
 - Removed from the safe list on purpose (`sort uniq curl wget less more top htop bat env free uptime cal file`, and `yarn`/`pnpm`), and `sed`/`awk` stay off it. That no longer blocks them: under allow-by-default they run unless they write outside the roots or read as installers. `sed -i`, `sort -o`, `uniq in out`, `less -o`, `git log --output`, and `tree -o` still ask when the target lands outside the project.
 - Custom rules entered as free text are normalized to bash prefix rules (`<text> *`) unless they already end in `*`. Exact-match rules are still available from the menu.
-- Regression tests: `node --experimental-strip-types ~/.pi/agent/extensions/governance/classifier.test.ts` (494 cases, including the allow-by-default ask matrix, heredoc-body handling, write-flag targets, the `mainWriteVerdict` allow/ask matrix, symlink resolution, the cd/redirect/mkdir/rm matrix, and `bashScopeEscape` quote/relative-path/`-c`/`--eval`/`--opt=value`/attached-flag/versioned-interpreter/stdin-payload handling) and `.../throughput.test.ts` (26 cases); `.../cache.test.ts` (8 cases) covers the rate, the bucket boundaries, and formatting.
+- Regression tests: `node --experimental-strip-types ~/.pi/agent/extensions/governance/classifier.test.ts` (494 cases, including the allow-by-default ask matrix, heredoc-body handling, write-flag targets, the `mainWriteVerdict` allow/ask matrix, symlink resolution, the cd/redirect/mkdir/rm matrix, and `bashScopeEscape` quote/relative-path/`-c`/`--eval`/`--opt=value`/attached-flag/versioned-interpreter/stdin-payload handling) and `.../throughput.test.ts` (26 cases); `.../cache.test.ts` (8 cases) covers the rate, the bucket boundaries, and formatting; `.../mcp.test.ts` (24 cases) covers MCP rule matching and persistence.
+- `classifier.test.ts` currently fails on this Windows machine at the `isSafeBashCommand` case for `cd <path> && grep -n "x|y" src` — it fails on `HEAD` too, so it predates the MCP work and is not caused by it.
 - Hard-blocked commands cannot be authorized inside a subagent (no UI); the worker must report back. Subagent `rm -rf` is hard-blocked there too, even inside an `allowPaths` grant.
 - Subagent processes (`PI_GOVERNED_SUBAGENT=1`) are implementation processes: they get no main-session context injection, cannot launch nested subagents, and fail closed when a call leaves their scope.

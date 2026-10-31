@@ -14,6 +14,9 @@
  *     git reset --hard, ...) is hard-blocked even inside the project. The user
  *     can authorize a single run with the one-time passcode from
  *     /i-understand-the-danger.
+ *   - MCP tools that are not allowlisted (by prefix or by rule) ask once, and
+ *     the answer is remembered per tool or per whole server, in the project or
+ *     global allowlist. Nothing MCP runs unattended by default.
  *   - Subagent processes (env PI_GOVERNED_SUBAGENT=1) are scoped to their
  *     working directory plus explicit extra paths approved at launch time.
  *     They cannot prompt, so out-of-scope actions fail closed.
@@ -38,7 +41,11 @@ import {
 	mainBashVerdict,
 	mainWriteVerdict,
 	matchBashRule,
+	matchMcpRule,
 	matchWriteRule,
+	MCP_TOOL_PREFIX,
+	mcpServerOf,
+	mcpServerRule,
 	resolveFromCwd,
 	resolveWritePath,
 	saveRules,
@@ -56,7 +63,7 @@ import { createThroughputTracker } from "./throughput.ts";
 const PASSCODE_TTL_MS = 2 * 60 * 1000;
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 /** Tools the main gate knows how to reason about; anything else fails closed. */
-const MAIN_ALLOWED_TOOLS = new Set([...READ_TOOLS, "subagent", "questionnaire", "ask", "confirm"]);
+const MAIN_ALLOWED_TOOLS = new Set([...READ_TOOLS, "subagent", "questionnaire", "ask", "confirm", "tool_search"]);
 /**
  * MCP tools that are read-only by construction: the web search server only
  * searches and fetches, so they are allowed by name prefix rather than being
@@ -470,6 +477,84 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 		};
 	}
 
+	/**
+	 * MCP tools prompt on first use. The server-wide options come first on
+	 * purpose: a server with hundreds of tools is exactly the case where
+	 * per-tool prompts train the user to click through without reading.
+	 */
+	async function askMcpPermission(
+		ctx: ExtensionContext,
+		tool: string,
+		input: Record<string, unknown>,
+	): Promise<{ block: true; reason: string } | undefined> {
+		const cwd = ctx.cwd;
+		const server = mcpServerOf(tool) ?? tool;
+
+		let preview = "";
+		try {
+			const json = JSON.stringify(input);
+			if (json && json !== "{}") preview = json.length > 240 ? `${json.slice(0, 240)}…` : json;
+		} catch {
+			preview = "(input not previewable)";
+		}
+
+		if (!ctx.hasUI) {
+			return {
+				block: true,
+				reason: [
+					`⛔ BLOCKED · MCP tool not allowlisted (${tool})`,
+					"No UI is available to approve it. Add a rule to the project or global allowlist first.",
+				].join("\n"),
+			};
+		}
+
+		const allowOnce = "Allow once";
+		const serverGlobal = `Always allow all tools from ${server} — everywhere`;
+		const serverProject = `Always allow all tools from ${server} — this project`;
+		const toolGlobal = "Always allow this tool — everywhere";
+		const toolProject = "Always allow this tool — this project";
+		const deny = "Deny";
+		const serverRule = mcpServerRule(tool);
+
+		const options = [allowOnce, serverGlobal, serverProject, toolGlobal, toolProject, deny];
+
+		const saveRule = (scope: "project" | "global", pattern: string): void => {
+			const rules = scope === "global" ? loadGlobalRules() : loadProjectRules(cwd);
+			addRule(rules, "mcp", pattern);
+			saveRules(scope === "global" ? globalRulesPath() : projectRulesPath(cwd), rules);
+			ctx.ui.notify(`✔ Allowlisted MCP tool (${scope}): ${pattern}`, "info");
+		};
+
+		const choice = await ctx.ui.select(
+			`MCP tool request\n${tool}${preview ? `\n${preview}` : ""}`,
+			options,
+		);
+
+		if (choice === allowOnce) return undefined;
+		if (choice === serverGlobal) {
+			saveRule("global", serverRule);
+			return undefined;
+		}
+		if (choice === serverProject) {
+			saveRule("project", serverRule);
+			return undefined;
+		}
+		if (choice === toolGlobal) {
+			saveRule("global", tool);
+			return undefined;
+		}
+		if (choice === toolProject) {
+			saveRule("project", tool);
+			return undefined;
+		}
+
+		// Denials are not remembered: the next call asks again, so a block stays visible.
+		return {
+			block: true,
+			reason: `⛔ DENIED · MCP tool ${tool}\nThe user declined. Ask for direction; do not retry.`,
+		};
+	}
+
 	async function handleHardBlock(
 		ctx: ExtensionContext,
 		command: string,
@@ -582,19 +667,31 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 			};
 		}
 
-		// Fail closed: a tool the gate does not understand never runs unattended.
-		if (!isAllowedTool(tool)) {
-			return {
-				block: true,
-				reason: [
-					`⛔ BLOCKED · unknown tool (${tool})`,
-					"The governance gate has no policy for this tool, so it cannot be allowed.",
-					"Add it to MAIN_ALLOWED_TOOLS in the governance extension if it is read-only.",
-				].join("\n"),
-			};
+		// Hardcoded read-only tools and pre-approved MCP prefixes run free.
+		if (isAllowedTool(tool)) return undefined;
+
+		// MCP tools prompt on first use, then remember per tool or per server.
+		if (tool.startsWith(MCP_TOOL_PREFIX)) {
+			const project = loadProjectRules(cwd);
+			const global = loadGlobalRules();
+			if (
+				project.mcp.some((rule) => matchMcpRule(rule, tool)) ||
+				global.mcp.some((rule) => matchMcpRule(rule, tool))
+			) {
+				return undefined;
+			}
+			return askMcpPermission(ctx, tool, input);
 		}
 
-		return undefined;
+		// Fail closed: a tool the gate does not understand never runs unattended.
+		return {
+			block: true,
+			reason: [
+				`⛔ BLOCKED · unknown tool (${tool})`,
+				"The governance gate has no policy for this tool, so it cannot be allowed.",
+				"Add it to MAIN_ALLOWED_TOOLS in the governance extension if it is read-only.",
+			].join("\n"),
+		};
 	}
 
 	// -----------------------------------------------------------------------
@@ -745,6 +842,7 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 					`  write: ${rules.write.length > 0 ? rules.write.join(", ") : "(none)"}`,
 					`  bash:  ${rules.bash.length > 0 ? rules.bash.join(", ") : "(none)"}`,
 					`  read:  ${rules.read.length > 0 ? rules.read.join(", ") : "(none)"}`,
+					`  mcp:   ${rules.mcp.length > 0 ? rules.mcp.join(", ") : "(none)"}`,
 				].join("\n");
 			ctx.ui.notify(
 				[
@@ -753,6 +851,7 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 					`Writes and local commands run free inside the project and ~/.pi; everything else prompts.`,
 					`Irreversible commands (rm -rf, force push, git reset --hard, ...) always prompt.`,
 					`Read rules extend the trusted roots for bash paths and cd.`,
+					`MCP tools prompt once; \`mcp__<server>__*\` allows a whole server, an exact tool name allows one tool.`,
 				].join("\n\n"),
 				"info",
 			);
