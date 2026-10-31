@@ -5,6 +5,8 @@ agent/models-store.json
 agent/sessions/
 agent/state/
 agent/logs/
+# machine-specific bin files
+agent/bin/
 *.log
 
 # Machine-specific allowlists
