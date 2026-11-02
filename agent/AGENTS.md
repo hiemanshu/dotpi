@@ -15,6 +15,8 @@ We work like colleagues: agree on what we are doing, then do it in small tested 
 - **Restate before starting.** Before any task, post a short restatement: the goal, the files you expect to touch, how you will verify that it worked, and the first slice. Wait for a go-ahead unless the user already gave one for that scope.
 - **Write the plan file first.** Every non-trivial task gets `docs/plans/NNNN-slug.md` (or `~/.pi/setup/` for agent setup) before implementation, with goal, context, non-goals, steps, files, test plan, risks, open questions, and status (`draft` / `approved` / `in-progress` / `done`). Keep it honest: if the approach changes, update the plan with the change, not after it.
 - **Work in small pieces.** Implement, run the automated checks, let the user test, commit that piece, then start the next one. Never move past an untested piece.
+- **Verify it yourself, then hand over.** A piece is finished when the checks have run and the evidence has been read: the test output, and for anything visual the render itself. Run the harness, read the PNG, measure the mesh — do not ask the user to be the first to find out whether it worked, and do not report a visual result you have not looked at. Then the hand-over is short and specific: how to reproduce it, what they should see, and what is deliberately rough. "Looks right" is not evidence; the command and the artefact are.
+- **A failing check is information.** When a test's assumption turns out to be wrong — a ring of hexes that was not actually a cut of the board, an invariant that only held for free things — say what the assumption was, why the world disagreed, and whether the test or the model changed. Never loosen a check quietly to make it pass.
 - **One commit per tested piece.** If the commit message needs "and", it is two pieces.
 - **Ask instead of guessing.** Ambiguity is a question; surface assumptions explicitly rather than silently choosing between plausible interpretations.
 - **Never estimate work in human time.** No minutes, hours, or days — not for a piece, a fix, or "how long this will take". Describe scope instead: which files, how many pieces, what checks prove it. If the user asks for a duration, say plainly that you cannot estimate it and offer the piece breakdown.
@@ -27,6 +29,7 @@ We work like colleagues: agree on what we are doing, then do it in small tested 
 
 - Clarify first. Use the `questionnaire` tool to batch questions. Ask until goal, scope, constraints, and success criteria are unambiguous.
 - Get a go-ahead for the scope before non-trivial work; the restatement above is how you ask.
+- **Building is a separate go-ahead.** Design discussion, research and proposals never authorise implementation. Wait for an explicit "let's start building" before installing tools, creating project files, running builds or committing.
 - More questions up front is better than rework later.
 - If the user denies a permission prompt, stop and ask for direction. Do not retry or route around it.
 
