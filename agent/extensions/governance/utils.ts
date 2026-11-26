@@ -853,6 +853,9 @@ const INSTALL_OR_PUBLISH: RegExp[] = [
 	/^\s*pacman\s+(-[A-Za-z]*S[A-Za-z]*\b|--sync\b)/i,
 	/^\s*git\s+push\b/i,
 	/^\s*git\s+clone\b/i,
+	// `pi install` clones a git repo and runs its extension code, so it is an
+	// install even though no package manager name appears in the command.
+	/^\s*pi\s+(install|update|uninstall|remove)\b/i,
 ];
 
 /** The install/publish form a segment names, or `null`. */

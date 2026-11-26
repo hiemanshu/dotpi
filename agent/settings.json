@@ -1,9 +1,12 @@
 {
-  "lastChangelogVersion": "1.4.0",
+  "lastChangelogVersion": "1.5.2",
   "defaultProvider": "deepseek",
   "defaultModel": "deepseek-flash",
   "editorPaddingX": 2,
   "outputPad": 1,
   "theme": "opencode",
-  "hideThinkingBlock": true
+  "hideThinkingBlock": true,
+  "packages": [
+    "git:github.com/DietrichGebert/ponytail"
+  ]
 }

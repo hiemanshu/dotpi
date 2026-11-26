@@ -8,7 +8,7 @@ A shareable overview of how this pi setup is configured. Built on **pi 1.2.x**. 
 2. **Work in small tested pieces.** Implement, run the automated checks, let the user test, commit that piece, then start the next. One commit per tested piece.
 3. **Ask, don't assume.** Clarifying questions are batched with a `questionnaire` tool; ambiguity is a question, never a guess.
 4. **Durable memory.** Plans, decisions, and gotchas are files in the repo; setup notes live in `~/.pi/setup/`.
-5. **Consent where it matters.** Ordinary work inside the project and `~/.pi` runs prompt-free. Prompts remain for actions reaching outside those roots and for irreversible operations, which need a human passcode.
+5. **Consent where it matters.** Ordinary work inside the project and `~/.pi` runs prompt-free. Prompts remain for actions reaching outside those roots and for irreversible operations, which need a human passcode. While a plan is approved, even those prompts collapse to one — installs — with the hard blocks unchanged (D-0037).
 
 ## What's installed
 
@@ -20,6 +20,7 @@ A shareable overview of how this pi setup is configured. Built on **pi 1.2.x**. 
 │   ├── governance/                # custom: permission gate, scoping, TUI chrome
 │   │   ├── index.ts               # tool_call gate, commands, lifecycle, prompts
 │   │   ├── utils.ts               # command classifier, path scoping, allowlist matching
+│   │   ├── trust.ts               # auto mode: plan status parse, scan scope, gate matrix
 │   │   ├── footer.ts              # footer + working indicator
 │   │   └── README.md
 │   ├── subagent/                  # copied from pi examples + patched (see below)
@@ -29,10 +30,26 @@ A shareable overview of how this pi setup is configured. Built on **pi 1.2.x**. 
 ├── agents/                        # subagent definitions (markdown + YAML frontmatter)
 │   ├── scout.md  planner.md  reviewer.md
 │   ├── worker.md  tester.md  documenter.md
+├── skills/
+│   └── writing-voice/             # his prose voice (D-0034), loaded on demand
+├── git/github.com/DietrichGebert/ponytail/   # installed package (D-0038)
 └── prompts/                       # slash-command prompt templates
     ├── implement.md  scout-and-plan.md
     ├── implement-and-review.md  document.md
 ```
+
+## Skills and packages
+
+Two things load besides `AGENTS.md`, and they govern different material:
+
+| What | Where | Governs |
+|---|---|---|
+| `writing-voice` skill | `agent/skills/writing-voice/` (hand-written, D-0034) | Prose a teammate reads: plans, decisions, notes, hand-offs, READMEs, PR text |
+| **Ponytail** 5.3.3, level `full` | `agent/git/github.com/DietrichGebert/ponytail/`, declared in `settings.json` → `packages` (D-0038) | Code: smallest complete change, say what was skipped, tests for new non-trivial logic |
+
+Ponytail is a pi package, not copied files, so it updates and uninstalls with `pi update --extensions` and `pi uninstall ponytail`. Its level lives in `%APPDATA%\ponytail\config.json` (`{"defaultMode": "full"}`; env `PONYTAIL_DEFAULT_MODE` wins), matching the level it runs at in Claude Code. It injects its ruleset into the system prompt every turn as a named section, so switching it off (`/ponytail off`, or typing "stop ponytail") keeps the cached prefix intact.
+
+Where they overlap — a hand-off paragraph describing a code change — the voice wins for the prose and ponytail wins for the code. Ponytail never shortens a document; `writing-voice` never argues for more code.
 
 Per project:
 
@@ -65,7 +82,7 @@ Implemented with the `tool_call` hook: every tool call is classified before it r
 
 ### Main session — prompts
 
-Every write/edit outside the project, `~/.pi`, and the temp dirs; every **install or publish** (`npm install`, `pip install`, `uv add`, `cargo install`, `brew install`, `apt install`, `git push`, `git clone`, …); every network command (`curl`, `wget`, `ssh`, `scp`, `rsync`, `nc`, …); every bash command that **writes** outside those roots; and destructive local forms (`find -delete`/`-exec`, `rm -r`). Dialog offers: **allow once**, **remember this file/folder or exact command in the project**, **remember everywhere**, **deny**. Rules are stored in:
+Every write/edit outside the project, `~/.pi`, and the temp dirs; every **install or publish** (`npm install`, `pip install`, `uv add`, `cargo install`, `brew install`, `apt install`, `git push`, `git clone`, `pi install`, …); every network command (`curl`, `wget`, `ssh`, `scp`, `rsync`, `nc`, …); every bash command that **writes** outside those roots; and destructive local forms (`find -delete`/`-exec`, `rm -r`). Dialog offers: **allow once**, **remember this file/folder or exact command in the project**, **remember everywhere**, **deny**. Rules are stored in:
 
 - `<project>/.pi/permissions.local.json` — project scope
 - `~/.pi/agent/permissions.json` — global scope
@@ -81,6 +98,15 @@ Format:
 ```
 
 Write rules are exact files or directories ending in `/`; relative paths resolve from the project root. `read` rules extend the trusted roots for bash paths and `cd` (they never grant writes). Bash rules are exact commands or prefix rules ending in ` *`. Compound commands (`&&`, `;`, `|`) can only be remembered exactly, so an approval can't bless whatever is appended.
+
+### Auto mode — one plan is the switch
+
+While a plan in `docs/plans/` says `Status: approved` or `in-progress`, the prompt list above collapses to one item: installs and publishes. Network commands, writes outside the project, `rm -r`/`find -delete`, and MCP tools with no rule run free; the hard-block list and the passcode are unchanged (D-0037).
+
+- **Derived, not latched.** The plan file is read at session start and before every turn, so `Status: done` turns it off at the next turn. Nothing is written to disk — no flag file, no allowlist entry, and no `/auto on`.
+- **`~/.pi/setup/*.md` counts only when the session is inside `~/.pi`**, so a setup plan cannot grant trust in a project.
+- **`⚙ auto`** sits in the status element, with one notification when it flips either way. `/auto` reports which file is holding it on; `/auto off` suppresses it for the session; `/auto` again re-derives.
+- **It is not a boundary.** Writes inside the project are free, so the plan file itself is agent-writable and an agent can approve its own plan. The mode buys network commands, outside writes, destructive local forms and unlisted MCP tools — it does not buy installs, hard blocks, or the passcode.
 
 ### Hard blocks
 
@@ -116,11 +142,12 @@ If a task genuinely needs an outside path, the child reports it; the main sessio
 | Command | Effect |
 |---|---|
 | `/permissions` | Show project and global allowlists |
+| `/auto` | Report auto mode; `/auto off` suppresses it for the session |
 | `/footer` | Toggle the governance footer vs pi's default |
 | `/header` | Toggle the opencode-style title bar vs pi's default |
 | `/i-understand-the-danger` | One-time passcode for one irreversible command |
 
-There is no plan mode and no `/plan` toggle. The confirmation loop (restate, plan file, small tested pieces) lives in `~/.pi/agent/AGENTS.md`, which loads every session.
+There is no plan mode and no `/plan` toggle. The confirmation loop (restate, plan file, small tested pieces) lives in `~/.pi/agent/AGENTS.md`, which loads every session. Auto mode is the closest thing to a plan mode, and it is one-way: the plan file's `Status:` line is what grants it, never a command.
 
 ## Workflow
 

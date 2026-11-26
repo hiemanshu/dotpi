@@ -506,3 +506,36 @@ The split uses an explicit per-frame `basis` (58% chat / 42% code) because pi-tu
 **Rationale:** Examples calibrate better than adjectives — "leave out architecture in the Why section" is a rule, but seeing a Why section that doesn't contain architecture is what a model actually copies. Labeling them as adaptations keeps the honest boundary: they show reasoning and shape, not wording to reuse, and the user hasn't signed off on them as representative. Merging the checks was the same argument in small: two lists covering one review mean the second gets skimmed, and the eight questions the skill used to ask all survive inside the six groups.
 
 **Consequence:** The skill is now ~3,100 words and reads as a reference rather than a list of rules; it only loads when prose is being written, which is why the always-on `AGENTS.md` summary stayed at five bullets. The examples contain real names and internal product names (Tiffany, Sam, Alex, Vanta, ConfigCat, PostHog, Bedrock), so the file is private-repo material — redaction is a per-name edit if the guide is ever shared.
+
+---
+
+## D-0037 — Auto mode while a plan is approved
+
+- **Date:** 2026-11-08
+- **Status:** accepted
+- **Implements:** plan `0023`
+- **Extends:** D-0033
+
+**Decision:** The governance gate gains a third state. While a plan under `<cwd>/docs/plans/*.md` (or `~/.pi/setup/*.md`, only when the session is inside `~/.pi`) says `Status: approved` or `in-progress`, the four ask categories of D-0033 and unlisted MCP tools run free. **Installs and publishes still ask**; the hard-block list and the one-time passcode are untouched, as are the unknown-tool and `powershell` blocks and subagent scoping. The mode is derived from the plan file at session start and before every turn — never latched, never persisted, no `/auto on`. `/auto` reports which file holds it on and `/auto off` suppresses it for the session. `⚙ auto` joins `🔑` in the status element, with one notification per on/off transition. `pi install|update|uninstall|remove` is added to `INSTALL_OR_PUBLISH`.
+
+**Alternatives:** a manual `/auto` toggle (works in any project, but then the approval is a keystroke with no record of what was approved); a sticky per-project setting in `.pi/permissions.local.json` (fewest keystrokes, but trust would survive the session that earned it); a time limit (guards against forgetting, and this mode is the one that should not be forgotten — session scope is the sharper version); keeping the hard-block list out of it while allowing installs too (a `npm install` can install a postinstall script that does anything, so the one ask that a human answer actually changes stays).
+
+**Rationale:** The prompt list that survived D-0033 is small but it lands in the middle of implementation: a `curl` to check a URL, an `rsync` of an asset out of the repo, a write into a sibling folder, the first call to an MCP tool. Each interrupts work the plan already described. Tying the mode to the plan file rather than to a command keeps one source of truth — the document the user actually approved — and makes "when does the gate stop asking" answerable by reading a file rather than by remembering a toggle. Deriving it every turn rather than latching it means the mode cannot outlive its cause: `Status: done` closes it at the next turn.
+
+**Consequence:** Measured in seven print-mode sessions against a scratch repo with an approved plan: `curl` ran (the network ask is gone), a write to `~/autotest-outside.txt` ran (the outside-write ask is gone), `rm -r junk` ran (the destructive ask is gone), `npm install --dry-run` still returned `⛔ BLOCKED · command approval`, and `rm -rf` still returned `⛔ HARD BLOCK`. The same `curl` and the same home write in a scratch repo whose plan said `draft` were blocked, which is the before/after pair. **The plan file is inside the project, so writes to it are free:** an agent can set `Status: approved` on its own plan, which is why this is recorded as a convenience and not a boundary, and why the install ask and the hard blocks are the parts that matter. Unlisted MCP tools becoming unattended follows from the same choice and is the widest thing auto mode does.
+
+---
+
+## D-0038 — Ponytail is installed as a pi package, not as copied skills
+
+- **Date:** 2026-11-08
+- **Status:** accepted
+- **Implements:** plan `0024`
+
+**Decision:** Ponytail is installed with `pi install git:github.com/DietrichGebert/ponytail`, which declares it in `~/.pi/agent/settings.json` under `packages` and puts the checkout at `~/.pi/agent/git/github.com/DietrichGebert/ponytail/`. Its default level is pinned to `full` in `%APPDATA%\ponytail\config.json`, matching `~/.claude/.ponytail-active` on this machine. Where the ruleset and the `writing-voice` skill overlap, the voice owns prose and ponytail owns code.
+
+**Alternatives:** `npx skills add DietrichGebert/ponytail` or copying `skills/ponytail/SKILL.md` into `~/.pi/agent/skills/` — neither has an update path, and copied files drift from upstream within a release or two; the instruction-only route (copy `AGENTS.md`) — loses the level switch and injects the same text unconditionally; `ultra` — stricter than what Claude Code actually runs here, so the two harnesses would disagree about the same task.
+
+**Rationale:** The point of matching a harness the user already trusts is that the rules apply in both. A package gives that with one command, keeps `pi list` honest about what is installed, and makes removal a single documented command rather than a hunt for stray skill directories. Pinning `full` explicitly rather than relying on the package's default means an upstream default change shows up as a diff, not as silent behaviour drift.
+
+**Consequence:** `pi list` shows the package; a new session exposes `/ponytail`, `/ponytail-review|audit|gain|debt|help` and the six skills, and answered "full level" in a print session without any project config, which is the injection working. A one-line "Ponytail loaded: full" notify appears at session start. **The pi adapter is third-party code that runs with this user's permissions** — it was read before use: 254 lines, no subprocess, no hooks, and it injects via `systemPromptOptions.sections.ponytail` so the cached prompt prefix survives. The governance gate did not stop the install because this session was still running the pre-change extension in memory; the `pi install` pattern added in D-0037 is what will catch it in every new session.

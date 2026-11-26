@@ -8,7 +8,7 @@ project or `~/.pi`, or is irreversible. Enforced with `tool_call` hooks.
 - Auto-allows `read`, `grep`, `find`, `ls` (anywhere) and **writes/edits inside the project, `~/.pi`, or the temp dirs (`/tmp`, `os.tmpdir()`)** — the whole tree, source and config included. There is no docs-only rule any more.
 - **Bash is allow-by-default** (D-0033). A local command runs without asking — `python3 -c`, `node -e`, `bash -c`, heredocs, `$(…)`, `$VAR`, `awk`, `sed`, `for` loops, `jq`, package scripts, `git commit`, `mv`, `mkdir`, redirects into the project or temp dirs. Proving a command "safe" was not buying much: arbitrary code was already reachable by writing a script into the project and running it.
 - What still asks, and why:
-  - **Installs and publishes** — `npm/pnpm/yarn/bun install|add|ci`, `pip install`, `uv add`, `poetry add`, `cargo install`, `go get`, `gem install`, `brew install`, `apt/dnf/yum/pacman/conda/snap install`, `git push`, `git clone`. Allowlistable, not hard-blocked; `sudo` in front stays hard-blocked.
+  - **Installs and publishes** — `npm/pnpm/yarn/bun install|add|ci`, `pip install`, `uv add`, `poetry add`, `cargo install`, `go get`, `gem install`, `brew install`, `apt/dnf/yum/pacman/conda/snap install`, `git push`, `git clone`, and `pi install|update|uninstall|remove` (which clones and runs third-party extension code). Allowlistable, not hard-blocked; `sudo` in front stays hard-blocked.
   - **Network** — `curl`, `wget`, `ssh`, `scp`, `sftp`, `rsync`, `ftp`, `telnet`, `nc`. Rare enough to be worth a look, and the only commands that leave the machine.
   - **Writes outside the project, `~/.pi`, and the temp dirs** — redirect targets (`>`, `>>`, `n>`), the destination of `cp`/`rsync`/`scp`/`ln`/`install`, every path argument of `mv`/`rm`/`mkdir`/`touch`/`tee`/`chmod`/`truncate`/`tar`/`unzip`, `dd of=`, output flags (`sed -i`, `sort -o`, `tree -o`, `less -o`, `uniq in out`, `git --output`), and `git -C`. `$HOME`/`$TMPDIR` are expanded so `> $HOME/.bashrc` is caught; other `$VAR` targets are judged by their static prefix. Reads are never restricted.
   - **Destructive local forms** — `find` with `-delete`/`-exec`/`-execdir`/`-ok`/`-fprint*`, and non-recursive and recursive `rm`. Recursive `rm -rf` and the rest of the hard-block list need the passcode.
@@ -28,11 +28,29 @@ project or `~/.pi`, or is irreversible. Enforced with `tool_call` hooks.
 - Scopes subagent processes to `PI_SUBAGENT_ROOT` + `PI_SUBAGENT_ALLOW_PATHS` for writes, reads, and bash (`cd` / absolute path checks). Out-of-scope reads and writes fail closed because subprocesses have no UI to prompt.
 - Hard-blocks `powershell` and any tool the gate does not know, in **both** the main session and subagent processes. `powershell` gets a message pointing at `bash`; unknown tools fail closed because there is no policy for them. The web search MCP tools (`mcp__websearch__*`) are allowed by name prefix in both processes: they only search and fetch, and routing them through `codemode` would let a script reach `bash`/`write` and bypass the gate.
 
+## Auto mode (⚙ auto)
+
+While a plan under `<cwd>/docs/plans/*.md` says `Status: approved` or `in-progress`, the gate stops asking. `~/.pi/setup/*.md` counts too, but only when the session is working inside `~/.pi` — a setup plan must not grant trust in a project.
+
+| Call | Normal | Auto mode |
+|---|---|---|
+| Network, writes outside the trusted roots, `rm -r`, `find -delete` | ask | run |
+| MCP tool with no rule | ask | run |
+| Installs and publishes | ask | **still ask** |
+| Hard-block list (`rm -rf`, `sudo`, force push, …) | passcode | **passcode** |
+| Unknown tool, `powershell` | block | **block** |
+| Subagent scope | env-scoped | unchanged |
+
+The mode is **derived, not latched**: the plan file is the switch, re-read on session start and before every turn, so flipping `Status:` to `done` turns it off at the next turn. Nothing is written to disk — no allowlist entry, no flag file, no `/auto on` (that would be the agent approving its own plan). `/auto off` suppresses it for the rest of the session; `/auto` re-derives and reports which file is holding it on. One notification fires on each on/off transition, and `⚙ auto` sits in the status element next to `🔑`.
+
+**It is not a trust boundary.** The plan file is inside the project, so writes to it are free and an agent can set `Status: approved` itself. What auto mode actually buys is network commands, outside writes, destructive local forms, and unlisted MCP tools — and what holds regardless is the install ask, the hard-block list, and the passcode.
+
 ## Commands
 
 | Command | Effect |
 |---|---|
 | `/permissions` | Show project and global allowlists |
+| `/auto` | Report auto mode (re-derives from the plan files); `/auto off` suppresses it for the session |
 | `/footer` | Toggle the governance footer vs pi's default |
 | `/header` | Toggle the opencode-style title bar vs pi's default |
 | `/user-rail` | Toggle the left rail on user messages |
@@ -43,6 +61,8 @@ project or `~/.pi`, or is irreversible. Enforced with `tool_call` hooks.
 - `<project>/.pi/permissions.local.json` — per-project allowlist (gitignore this)
 - `<agent-dir>/permissions.json` — global allowlist
 - `utils.ts` — classification, scoping, allowlist matching (no pi imports; testable)
+- `trust.ts` — auto mode: the plan `Status:` parse, the scan scope, and the gate matrix (no pi imports; testable)
+- `trust.test.ts` — auto mode tests (34 cases)
 - `cache.ts` — cache-hit summary for the footer (pure): session rate, last-call bucket, formatting.
 - `mcp.test.ts` — MCP rule matching and persistence (24 cases): exact vs server-wide rules, cross-server and prefix-collision non-matches, server derivation, and the round-trip proving a bash-rule save keeps existing `mcp` rules.
 - `throughput.ts` — live tok/s + TTFT tracker, footer segment text (`throughputParts`), and formatters (pure, injectable clock). The rate counts every generated token — text, thinking, and tool-call argument JSON — matching `usage.output` (D-0028); tool results and nested tool usage are excluded. An estimated rate gets `~`, and `≈` marks a rate that still includes startup.
@@ -102,7 +122,7 @@ An MCP tool that no rule covers asks once. The dialog offers the whole server (`
 - Network commands (`curl`, `wget`, `ssh`, `scp`, `sftp`, `rsync`, `ftp`, `telnet`, `nc`, `ncat`, `nmap`, …) always prompt: they have no path argument the gate could scope. Allowlist the exact form if it becomes routine.
 - Removed from the safe list on purpose (`sort uniq curl wget less more top htop bat env free uptime cal file`, and `yarn`/`pnpm`), and `sed`/`awk` stay off it. That no longer blocks them: under allow-by-default they run unless they write outside the roots or read as installers. `sed -i`, `sort -o`, `uniq in out`, `less -o`, `git log --output`, and `tree -o` still ask when the target lands outside the project.
 - Custom rules entered as free text are normalized to bash prefix rules (`<text> *`) unless they already end in `*`. Exact-match rules are still available from the menu.
-- Regression tests: `node --experimental-strip-types ~/.pi/agent/extensions/governance/classifier.test.ts` (494 cases, including the allow-by-default ask matrix, heredoc-body handling, write-flag targets, the `mainWriteVerdict` allow/ask matrix, symlink resolution, the cd/redirect/mkdir/rm matrix, and `bashScopeEscape` quote/relative-path/`-c`/`--eval`/`--opt=value`/attached-flag/versioned-interpreter/stdin-payload handling) and `.../throughput.test.ts` (26 cases); `.../cache.test.ts` (8 cases) covers the rate, the bucket boundaries, and formatting; `.../mcp.test.ts` (24 cases) covers MCP rule matching and persistence.
+- Regression tests: `node --experimental-strip-types ~/.pi/agent/extensions/governance/classifier.test.ts` (494 cases, including the allow-by-default ask matrix, heredoc-body handling, write-flag targets, the `mainWriteVerdict` allow/ask matrix, symlink resolution, the cd/redirect/mkdir/rm matrix, and `bashScopeEscape` quote/relative-path/`-c`/`--eval`/`--opt=value`/attached-flag/versioned-interpreter/stdin-payload handling), `.../trust.test.ts` (34 cases: the `Status:` parse, the scan scope, the auto-mode gate matrix, and the `pi install` pattern), `.../throughput.test.ts` (26 cases); `.../cache.test.ts` (8 cases) covers the rate, the bucket boundaries, and formatting; `.../mcp.test.ts` (24 cases) covers MCP rule matching and persistence.
 - `classifier.test.ts` currently fails on this Windows machine at the `isSafeBashCommand` case for `cd <path> && grep -n "x|y" src` — it fails on `HEAD` too, so it predates the MCP work and is not caused by it.
 - Hard-blocked commands cannot be authorized inside a subagent (no UI); the worker must report back. Subagent `rm -rf` is hard-blocked there too, even inside an `allowPaths` grant.
 - Subagent processes (`PI_GOVERNED_SUBAGENT=1`) are implementation processes: they get no main-session context injection, cannot launch nested subagents, and fail closed when a call leaves their scope.

@@ -17,6 +17,12 @@
  *   - MCP tools that are not allowlisted (by prefix or by rule) ask once, and
  *     the answer is remembered per tool or per whole server, in the project or
  *     global allowlist. Nothing MCP runs unattended by default.
+ *   - Auto mode (D-0037): while a plan under `<cwd>/docs/plans` (or
+ *     `~/.pi/setup` when the session is inside `~/.pi`) says `approved` or
+ *     `in-progress`, the four ask categories above and unlisted MCP tools run
+ *     free. Installs/publishes still ask; the hard-block list and the passcode
+ *     are untouched. Derived from the plan file every turn, never latched,
+ *     never persisted; `/auto off` suppresses it for the session.
  *   - Subagent processes (env PI_GOVERNED_SUBAGENT=1) are scoped to their
  *     working directory plus explicit extra paths approved at launch time.
  *     They cannot prompt, so out-of-scope actions fail closed.
@@ -35,6 +41,7 @@ import {
 	displayPath,
 	expandHome,
 	homeRelative,
+	installOrPublishReason,
 	isInside,
 	isCompoundCommand,
 	loadRules,
@@ -59,6 +66,7 @@ import {
 } from "./footer.ts";
 import { installBlockRenderers, installUserMessageRail } from "./renderers.ts";
 import { createThroughputTracker } from "./throughput.ts";
+import { autoVerdict, planScanDirs, qualifyingPlan, type PlanFile, type TrustScope } from "./trust.ts";
 
 const PASSCODE_TTL_MS = 2 * 60 * 1000;
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -148,6 +156,33 @@ function readRoots(cwd: string): string[] {
 	return uniqueResolved([cwd, piRootPath(), ...piInstallRoots(), "/tmp", os.tmpdir(), ...configured]);
 }
 
+/**
+ * Plan files that can hold auto mode on, read from the directories the scope
+ * allows. A missing directory is normal (a project without `docs/plans`), so it
+ * is skipped rather than treated as an error.
+ */
+function readPlanFiles(scope: TrustScope): PlanFile[] {
+	const files: PlanFile[] = [];
+	for (const dir of planScanDirs(scope)) {
+		let names: string[];
+		try {
+			names = fs.readdirSync(dir);
+		} catch {
+			continue;
+		}
+		for (const name of names.sort()) {
+			if (!name.endsWith(".md")) continue;
+			const p = path.join(dir, name);
+			try {
+				files.push({ path: p, text: fs.readFileSync(p, "utf-8") });
+			} catch {
+				/* an unreadable plan cannot hold the mode on */
+			}
+		}
+	}
+	return files;
+}
+
 function pathFromInput(input: Record<string, unknown>): string | null {
 	const p = input.path ?? input.file_path;
 	return typeof p === "string" && p.length > 0 ? p : null;
@@ -174,6 +209,10 @@ function isOutsideSubagentScope(p: string): boolean {
 
 export default function governanceExtension(pi: ExtensionAPI): void {
 	let passcode: Passcode | null = null;
+	/** The plan file holding auto mode on, or null when the mode is off. */
+	let autoPlan: string | null = null;
+	/** `/auto off`: the session stays off even while a plan still says approved. */
+	let autoSuppressed = false;
 	let footerEnabled = true;
 	let footerInstalled = false;
 	let titleEnabled = true;
@@ -200,10 +239,38 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 		return passcode !== null && Date.now() < passcode.expiresAt;
 	}
 
+	function autoActive(): boolean {
+		return autoPlan !== null;
+	}
+
+	/**
+	 * Re-derive auto mode from the plan files. Called on session start and before
+	 * every turn, so the plan file is the switch: flipping `Status:` to `done`
+	 * turns the mode off at the next turn, and nothing outlives its cause.
+	 */
+	function refreshAutoMode(ctx: ExtensionContext): void {
+		const plan = autoSuppressed
+			? null
+			: qualifyingPlan(readPlanFiles({ cwd: ctx.cwd, piRoot: piRootPath() }));
+		const next = plan?.path ?? null;
+		if (next === autoPlan) return;
+		autoPlan = next;
+		updateStatus(ctx);
+		if (!ctx.hasUI) return;
+		ctx.ui.notify(
+			next
+				? `⚙ auto on — ${displayPath(next, ctx.cwd)} is approved.\nInstalls, publishes and the hard-block list still ask.`
+				: "⚙ auto off — no approved plan.",
+			"info",
+		);
+	}
+
 	function updateStatus(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
-		const key = passcodeActive() ? ctx.ui.theme.fg("warning", "🔑") : "";
-		ctx.ui.setStatus("governance", key);
+		const parts: string[] = [];
+		if (autoActive()) parts.push(ctx.ui.theme.fg("warning", "⚙ auto"));
+		if (passcodeActive()) parts.push(ctx.ui.theme.fg("warning", "🔑"));
+		ctx.ui.setStatus("governance", parts.join(" "));
 	}
 
 	function setupFooter(ctx: ExtensionContext): void {
@@ -617,6 +684,8 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 			) {
 				return undefined;
 			}
+			// Auto mode: an approved plan covers writes outside the trusted roots.
+			if (autoActive()) return undefined;
 			return askWritePermission(ctx, abs, cwd);
 		}
 
@@ -653,6 +722,10 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 				return undefined;
 			}
 
+			// Auto mode covers network, outside writes and destructive local forms.
+			// An install changes what software runs on the machine, so it still asks.
+			if (autoActive() && autoVerdict("bash", installOrPublishReason(command)) === "allow") return undefined;
+
 			if (cwdNote) return askBashPermission(ctx, command, cwd, cwdNote);
 			return askBashPermission(ctx, command, cwd);
 		}
@@ -680,6 +753,8 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 			) {
 				return undefined;
 			}
+			// Auto mode: an approved plan covers MCP tools with no rule.
+			if (autoActive()) return undefined;
 			return askMcpPermission(ctx, tool, input);
 		}
 
@@ -850,9 +925,67 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 					render("Global", global, globalRulesPath()),
 					`Writes and local commands run free inside the project and ~/.pi; everything else prompts.`,
 					`Irreversible commands (rm -rf, force push, git reset --hard, ...) always prompt.`,
+					`Auto mode (⚙ auto) covers everything except installs while a plan is approved; /auto reports it.`,
 					`Read rules extend the trusted roots for bash paths and cd.`,
 					`MCP tools prompt once; \`mcp__<server>__*\` allows a whole server, an exact tool name allows one tool.`,
 				].join("\n\n"),
+				"info",
+			);
+		},
+	});
+
+	pi.registerCommand("auto", {
+		description: "Show auto mode (/auto off disables it for this session)",
+		handler: async (args, ctx) => {
+			const action = (args ?? "").trim().toLowerCase();
+
+			if (action === "off") {
+				autoSuppressed = true;
+				const was = autoPlan;
+				autoPlan = null;
+				updateStatus(ctx);
+				ctx.ui.notify(
+					was
+						? `⚙ auto off — suppressed for this session. ${displayPath(was, ctx.cwd)} still says approved; /auto re-derives.`
+						: "⚙ auto is already off.",
+					"info",
+				);
+				return;
+			}
+
+			if (action === "on") {
+				ctx.ui.notify(
+					"⚙ auto turns on from a plan file, not from here.\nSet `Status: approved` in docs/plans/*.md (or ~/.pi/setup/*.md inside ~/.pi).",
+					"warning",
+				);
+				return;
+			}
+
+			// No argument: drop a previous suppression and re-read the plan files.
+			autoSuppressed = false;
+			refreshAutoMode(ctx);
+
+			if (!autoPlan) {
+				ctx.ui.notify(
+					[
+						"⚙ auto is OFF",
+						"No plan under docs/plans/ says `approved` or `in-progress`.",
+						"Everything asks exactly as usual.",
+					].join("\n"),
+					"info",
+				);
+				return;
+			}
+
+			ctx.ui.notify(
+				[
+					"⚙ auto is ON",
+					`Holding it on: ${displayPath(autoPlan, ctx.cwd)}`,
+					"Free while on: network commands, writes outside the project/~/.pi/temp, rm -r and find -delete, MCP tools with no rule.",
+					"Still asks: installs and publishes.",
+					"Always asks: the hard-block list, passcode required (rm -rf, sudo, force push, git reset --hard, ...).",
+					"This session only; nothing is written to disk.",
+				].join("\n"),
 				"info",
 			);
 		},
@@ -901,10 +1034,13 @@ export default function governanceExtension(pi: ExtensionAPI): void {
 		setupFooter(ctx);
 		setupTitleBar(ctx);
 		setupThinking(ctx);
+		// The plan file is the switch: re-derived on every turn, never latched.
+		refreshAutoMode(ctx);
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		updateStatus(ctx);
+		refreshAutoMode(ctx);
 		setupFooter(ctx);
 		setupTitleBar(ctx);
 		setupThinking(ctx);

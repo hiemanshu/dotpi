@@ -16,3 +16,7 @@ agent/permissions.json
 # Config snapshots written by setup/uninstall recovery
 agent/*.rea.backup
 agent/*.rea.backup.*
+
+# Package checkouts and caches — reinstalled from the `packages` entry in settings.json
+agent/git/
+agent/tmp/
